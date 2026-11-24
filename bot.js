@@ -2592,7 +2592,7 @@ process.on("uncaughtException", (e) => console.error("uncaughtException:", e));
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
 
-(async () => {
+async function initBot() {
   await migrateFromSQLite();
   const me = await bot.telegram.getMe();
   BOT_USERNAME = me.username;
@@ -2602,6 +2602,15 @@ process.once("SIGTERM", () => bot.stop("SIGTERM"));
     { command: "email", description: "Cek ketersediaan verifikasi email" },
     { command: "cancel", description: "Batalkan aksi saat ini" }
   ]);
-  await bot.launch();
-  console.log("Bot running as @" + BOT_USERNAME);
-})();
+  return bot;
+}
+
+module.exports = { bot, initBot };
+
+if (require.main === module || !process.env.VERCEL) {
+  (async () => {
+    await initBot();
+    await bot.launch();
+    console.log("Bot running as @" + BOT_USERNAME);
+  })();
+}
