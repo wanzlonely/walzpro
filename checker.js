@@ -217,12 +217,13 @@ function normalizeResult(phone, parsed, existText, codeText) {
   const methods = extractMethodWaits(parsed, existJson, codeJson);
   const primaryWait = methods.sms || methods.voice || methods.email || methods.wa_old || methods.flash || 0;
 
-  const hardCooldownReasons = ["temporarily_unavailable", "rate_overlimit", "no_routes"];
-  const softLimitReasons = ["too_recent", "too_many", "too_many_guesses", "try_again", "next_method"];
+  const hardCooldownReasons = [
+    "too_recent", "too_many", "too_many_guesses", "try_again", "next_method",
+    "temporarily_unavailable", "rate_overlimit", "no_routes"
+  ];
   const concurrentReasons = ["guessed_too_fast", "wrong_code", "stale_code", "code_mismatch"];
-  const isHardCooldown = hardCooldownReasons.includes(codeReason) || primaryWait >= 600;
-  const isSoftLimitReason = softLimitReasons.includes(codeReason);
   const isConcurrent = concurrentReasons.includes(codeReason) || Boolean(parsed.isConcurrent);
+  const isHardCooldown = hardCooldownReasons.includes(codeReason) || primaryWait > 0;
 
   let isBanned = Boolean(parsed.isBanned);
   let isCloneBlocked = Boolean(parsed.isCloneBlocked);
@@ -235,38 +236,26 @@ function normalizeResult(phone, parsed, existText, codeText) {
   let cooldownSeconds = primaryWait;
   let state = "UNKNOWN";
 
-  const softWait = methods.sms > 0 && methods.sms < 600 ? methods.sms
-    : (methods.voice > 0 && methods.voice < 600 ? methods.voice
-    : (methods.email > 0 && methods.email < 600 ? methods.email
-    : (primaryWait > 0 && primaryWait < 600 ? primaryWait : 0)));
-
   if (isBanned) {
     state = "BANNED";
   } else if (isCloneBlocked) {
     state = "CLONE_BLOCKED";
-  } else if (isConcurrent && !isHardCooldown) {
+  } else if (isConcurrent && primaryWait === 0) {
     isInUse = true;
     isReady = false;
     state = "IN_USE";
-    cooldownSeconds = softWait || primaryWait || 0;
-  } else if (isHardCooldown) {
+  } else if (isHardCooldown || primaryWait > 0) {
     isCooldown = true;
-    state = "COOLDOWN";
-  } else if (isSoftLimitReason || softWait > 0) {
-    isSmsLimited = true;
     isReady = false;
-    cooldownSeconds = softWait || primaryWait || cooldownSeconds;
-    state = "SMS_LIMIT";
-  } else if (baseReady || (primaryWait === 0 && !isHardCooldown)) {
+    state = "COOLDOWN";
+    cooldownSeconds = primaryWait > 0 ? primaryWait : Math.max(cooldownSeconds, 60);
+  } else if (baseReady) {
     isReady = true;
     cooldownSeconds = 0;
     state = "READY";
-  } else if (primaryWait > 0) {
-    isCooldown = true;
-    state = "COOLDOWN";
-  } else if (baseReady) {
-    isReady = true;
-    state = "READY";
+  } else {
+    isReady = false;
+    state = "UNKNOWN";
   }
 
   const deviceOn = extractDeviceState(parsed, existJson, codeJson);
@@ -385,11 +374,9 @@ async function callWA(reqObj, userAgent, sharedHeaders = null, timeoutMs = DEFAU
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
         "User-Agent": userAgent || "WhatsApp/2.26.42.77 iOS/17.4 Device/iPhone_15_Pro",
-        "Accept": "text/json, application/json, */*",
-        "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
         "Connection": "keep-alive",
-        "Origin": "https://www.whatsapp.com",
         ...(sharedHeaders || {}),
         ...((reqObj && reqObj.headers) || {})
       },
@@ -460,31 +447,27 @@ async function checkPhone(rawPhone) {
       codeText = await callWA(payload.code, payload.userAgent, payload.headers);
     } catch (_) {}
 
-    let parsed = WADetector.parseDualResponse(payload.phoneInfo, existText, codeText || null);
+    const parsed = WADetector.parseDualResponse(payload.phoneInfo, existText, codeText || null);
     let normalized = normalizeResult(formattedPhone, parsed, existText, codeText || null);
 
-    // Re-check once when signs of concurrent verification appear for fresher accuracy
-    const reason = String((normalized && normalized.error) || (normalized && normalized.state) || "").toLowerCase();
     const codeJson = safeJsonParse(codeText || "") || {};
     const codeReason = String(codeJson.reason || "").toLowerCase();
     if (
       normalized &&
       normalized.success &&
-      (normalized.isInUse || ["guessed_too_fast", "wrong_code", "stale_code", "too_recent"].includes(codeReason))
+      (normalized.isInUse || ["guessed_too_fast", "wrong_code", "stale_code"].includes(codeReason))
     ) {
       try {
-        await new Promise(r => setTimeout(r, 350));
-        const exist2 = await callWAWithRetry(payload.exist, payload.userAgent, payload.headers, DEFAULT_TIMEOUT_MS, 1);
-        let code2 = codeText;
-        try {
-          await new Promise(r => setTimeout(r, 20));
-          code2 = await callWAWithRetry(payload.code, payload.userAgent, payload.headers, DEFAULT_TIMEOUT_MS, 1);
-        } catch (_) {}
-        parsed = WADetector.parseDualResponse(payload.phoneInfo, exist2, code2 || null);
-        const normalized2 = normalizeResult(formattedPhone, parsed, exist2, code2 || null);
+        await new Promise(r => setTimeout(r, 300));
+        const exist2 = await callWA(payload.exist, payload.userAgent, payload.headers);
+        const parsed2 = WADetector.parseDualResponse(payload.phoneInfo, exist2, codeText || null);
+        const normalized2 = normalizeResult(formattedPhone, parsed2, exist2, codeText || null);
         if (normalized2 && normalized2.success) {
           normalized2.isInUse = true;
-          if (normalized2.state === "READY") normalized2.state = "IN_USE";
+          if (normalized2.state === "READY") {
+            normalized2.state = "IN_USE";
+            normalized2.isReady = false;
+          }
           normalized = normalized2;
         }
       } catch (_) {}
@@ -682,13 +665,11 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
       try {
         existText = await callWAWithRetry(payload.exist, payload.userAgent, payload.headers, sendTimeout, 2, signal);
       } catch (e) {
-        return {
-          success: false,
-          phone: formattedPhone,
-          method: methodKey,
-          error: String(e && e.message ? e.message : e),
-          probe
-        };
+        const em = String(e && e.message ? e.message : e);
+        if (em === "CANCELLED") {
+          return { success: false, phone: formattedPhone, method: methodKey, error: "CANCELLED", probe };
+        }
+        // lanjut ke /v2/code meski exist gagal jaringan
       }
     }
 
