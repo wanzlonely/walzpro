@@ -45,14 +45,14 @@ const REWARDS = [
 ];
 
 const MENU_LABELS = {
-  DETECT: "◈ ᴅᴇᴛᴇᴋꜱɪ ɴᴏᴍᴏʀ",
-  EMAIL_FIX: "✦ ᴍᴜɴᴄᴜʟᴋᴀɴ ᴇᴍᴀɪʟ",
-  SEND_CODE: "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ",
-  STATUS: "◈ ꜱᴛᴀᴛᴜꜱ ꜱᴀʏᴀ",
-  REFERRAL: "❖ ʀᴇꜰᴇʀᴀʟ",
-  PREMIUM: "♛ ʙᴇʟɪ ᴘʀᴇᴍɪᴜᴍ",
-  LEADERBOARD: "♛ ʟᴇᴀᴅᴇʀʙᴏᴀʀᴅ",
-  ADMIN: "⚙ ᴀᴅᴍɪɴ ᴘᴀɴᴇʟ"
+  DETECT: "◈  ᴅᴇᴛᴇᴋꜱɪ  ɴᴏᴍᴏʀ",
+  EMAIL_FIX: "✦  ᴍᴜɴᴄᴜʟᴋᴀɴ  ᴇᴍᴀɪʟ",
+  SEND_CODE: "✧  ᴛᴇᴍᴘᴏʀᴀʀʏ",
+  STATUS: "◈  ꜱᴛᴀᴛᴜꜱ  ꜱᴀʏᴀ",
+  REFERRAL: "❖  ʀᴇꜰᴇʀᴀʟ",
+  PREMIUM: "♛  ʙᴇʟɪ  ᴘʀᴇᴍɪᴜᴍ",
+  LEADERBOARD: "♛  ʟᴇᴀᴅᴇʀʙᴏᴀʀᴅ",
+  ADMIN: "⚙  ᴀᴅᴍɪɴ  ᴘᴀɴᴇʟ"
 };
 
 const ALL_MENU_TEXTS = new Set(Object.values(MENU_LABELS));
@@ -2273,8 +2273,11 @@ function formatMethodsBlock(methods, isDeviceOn) {
   lines.push(`▸ ꜱᴍꜱ ⦂ ${methodWaitLabel(m.sms)}`);
   lines.push(`▸ ᴠᴏɪᴄᴇ ⦂ ${methodWaitLabel(m.voice)}`);
   lines.push(`▸ ꜰʟᴀꜱʜ ⦂ ${methodWaitLabel(m.flash)}`);
-  if (!isDeviceOn) lines.push("▸ ᴡᴀ_ᴏʟᴅ ⦂ ᴛɪᴅᴀᴋ ᴀᴅᴀ ᴘᴇʀᴀɴɢᴋᴀᴛ");
-  else lines.push(`▸ ᴡᴀ_ᴏʟᴅ ⦂ ${methodWaitLabel(m.wa_old)}`);
+  if (!isDeviceOn && !(Number(m.wa_old) > 0)) {
+    lines.push("▸ ᴡᴀ_ᴏʟᴅ ⦂ ᴏꜰꜰ · ʙɪꜱᴀ ᴅɪᴄᴏʙᴀ");
+  } else {
+    lines.push(`▸ ᴡᴀ_ᴏʟᴅ ⦂ ${methodWaitLabel(m.wa_old)}`);
+  }
   lines.push(`▸ ᴇᴍᴀɪʟ ⦂ ${methodWaitLabel(m.email)}`);
   return lines.join("\n");
 }
@@ -2304,7 +2307,7 @@ function buildSendMethodKeyboard(phone, probe) {
   row1.push(btn("ꜱᴍꜱ", "send_sms", "primary"));
   row1.push(btn("ᴠᴏɪᴄᴇ", "send_voice", "primary"));
   row1.push(btn("ꜰʟᴀꜱʜ", "send_flash", "primary"));
-  if (dev) row2.push(btn("ᴡᴀ ᴏʟᴅ", "send_wa_old", "success"));
+  row2.push(btn("ᴡᴀ ᴏʟᴅ", "send_wa_old", "success"));
   row2.push(btn("ᴇᴍᴀɪʟ", "send_email", "success"));
   rows.push(row1);
   if (row2.length) rows.push(row2);
@@ -2363,7 +2366,7 @@ async function runAutoSendLoop(ctx, phone, method) {
     if (lastRes && lastRes.methods) {
       const m = lastRes.methods || {};
       const devOnPrev = Boolean(lastRes.isDeviceOn || (lastRes.probe && lastRes.probe.isDeviceOn));
-      const order = [method, "sms", "voice", "flash", "email", "wa_old"];
+      const order = ["wa_old", method, "sms", "voice", "flash", "email"];
       const seen = new Set();
       for (const cand of order) {
         if (seen.has(cand)) continue;
@@ -2415,8 +2418,10 @@ async function runAutoSendLoop(ctx, phone, method) {
     const effectiveCd = Math.max(methodWait, cd);
     const isHardLock = effectiveCd >= 600;
     const isBanned = res.state === "BANNED" || res.error === "banned";
-    const isHardFail = ["BANNED", "FAILED", "NO_DEVICE", "INVALID_NUMBER"].includes(String(res.state || "")) ||
-      ["banned", "wa_old_not_available", "invalid_phone", "no_code_endpoint"].includes(String(res.error || ""));
+    const errLow = String(res.error || "").toLowerCase();
+    const isMethodBlocked = res.state === "METHOD_BLOCKED" || errLow === "bad_param" || errLow === "method_not_allowed";
+    const isHardFail = ["BANNED", "INVALID_NUMBER"].includes(String(res.state || "")) ||
+      ["banned", "invalid_phone", "no_code_endpoint"].includes(errLow);
 
     if (res.success) successCount += 1;
 
@@ -2439,6 +2444,29 @@ async function runAutoSendLoop(ctx, phone, method) {
         "ⓘ ɴᴏᴍᴏʀ ꜱᴜᴅᴀʜ ꜱᴜʟɪᴛ ᴍᴇɴᴇʀɪᴍᴀ ᴋᴏᴅᴇ ᴜɴᴛᴜᴋ ꜱᴇᴍᴇɴᴛᴀʀᴀ."
       ].join("\n"), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }));
       break;
+    }
+
+    // Method ditolak server (bad_param) → ganti method, jangan hentikan temporary
+    if (isMethodBlocked) {
+      if (res.methods) lastRes = res;
+      try {
+        await editInline(ctx, [
+          "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ",
+          "",
+          `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(res.phone || phone)}</code>`,
+          `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
+          "▸ ꜱᴛᴀᴛᴜꜱ ⦂ ᴍᴇᴛᴏᴅᴇ ᴛɪᴅᴀᴋ ᴠᴀʟɪᴅ",
+          `▸ ᴀʟᴀꜱᴀɴ ⦂ ${esc(res.error || "bad_param")}`,
+          `▸ ᴘᴇʀᴄᴏʙᴀᴀɴ ⦂ #${attempt}</blockquote>`,
+          "",
+          "◈ ᴍᴇᴛᴏᴅᴇ",
+          `<blockquote>${formatMethodsBlock(methods, devOn)}</blockquote>`,
+          "",
+          "ⓘ ᴍᴇɴᴄᴏʙᴀ ᴍᴇᴛᴏᴅᴇ ʟᴀɪɴ (ᴜᴛᴀᴍᴀᴋᴀɴ ᴡᴀ_ᴏʟᴅ)..."
+        ].join("\n"), stopKb);
+      } catch (_) {}
+      await new Promise(r => setTimeout(r, 1200));
+      continue;
     }
 
     if (isBanned || isHardFail) {
