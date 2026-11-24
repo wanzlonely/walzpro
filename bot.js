@@ -12,7 +12,7 @@ const ADMIN_IDS = (process.env.ADMIN_IDS || "").split(",").filter(Boolean).map(N
 const FREE_DAILY_LIMIT = parseInt(process.env.FREE_DAILY_LIMIT || "3", 10);
 const PREMIUM_BATCH_LIMIT = parseInt(process.env.PREMIUM_BATCH_LIMIT || "30", 10);
 const CONCURRENCY = parseInt(process.env.CONCURRENCY || "12", 10);
-const CHECK_TIMEOUT_MS = parseInt(process.env.CHECK_TIMEOUT_MS || "10000", 10);
+const CHECK_TIMEOUT_MS = parseInt(process.env.CHECK_TIMEOUT_MS || "28000", 10);
 const CHECK_RETRIES = parseInt(process.env.CHECK_RETRIES || "2", 10);
 const RESULT_CACHE_TTL = parseInt(process.env.RESULT_CACHE_TTL || "60", 10);
 
@@ -453,31 +453,31 @@ function formatWIB(iso) {
 
 function formatCooldown(sec) {
   const s = Math.max(0, Math.floor(Number(sec) || 0));
-  if (s === 0) return "0ᴅᴛᴋ";
+  if (s === 0) return "0dtk";
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   const remS = s % 60;
   if (h > 0) {
-    return m > 0 ? `${h}ᴊᴀᴍ ${m}ᴍɴᴛ` : `${h}ᴊᴀᴍ`;
+    return m > 0 ? h + "jam " + m + "mnt" : h + "jam";
   }
   if (m > 0) {
-    return remS > 0 ? `${m}ᴍɴᴛ ${remS}ᴅᴛᴋ` : `${m}ᴍɴᴛ`;
+    return remS > 0 ? m + "mnt " + remS + "dtk" : m + "mnt";
   }
-  return `${remS}ᴅᴛᴋ`;
+  return remS + "dtk";
 }
 function formatElapsed(sec) {
   const n = Number(sec);
-  if (!Number.isFinite(n) || n < 0) return "—";
+  if (!Number.isFinite(n) || n < 0) return "-";
   if (n < 60) {
     const t = n < 10 ? n.toFixed(1) : String(Math.round(n));
-    return `${t}ꜱ`;
+    return t + "s";
   }
   const m = Math.floor(n / 60);
   const s = Math.round(n % 60);
-  if (m < 60) return s > 0 ? `${m}ᴍ ${s}ꜱ` : `${m}ᴍ`;
+  if (m < 60) return s > 0 ? (m + "m " + s + "s") : (m + "m");
   const h = Math.floor(m / 60);
   const rm = m % 60;
-  return rm > 0 ? `${h}ᴊ ${rm}ᴍ` : `${h}ᴊ`;
+  return rm > 0 ? (h + "j " + rm + "m") : (h + "j");
 }
 
 
@@ -616,9 +616,13 @@ async function checkSingleSmart(phone, forceFresh = false) {
   }
 
   let lastRes = null;
-  for (let attempt = 0; attempt <= CHECK_RETRIES; attempt++) {
+  const maxAttempts = forceFresh ? CHECK_RETRIES + 1 : CHECK_RETRIES;
+  for (let attempt = 0; attempt <= maxAttempts; attempt++) {
     try {
-      const res = await callWithTimeout(() => checkPhone(phone), CHECK_TIMEOUT_MS);
+      const timeoutMs = forceFresh
+        ? CHECK_TIMEOUT_MS + attempt * 3000
+        : CHECK_TIMEOUT_MS;
+      const res = await callWithTimeout(() => checkPhone(phone), timeoutMs);
       lastRes = res;
       if (res && res.success && res.state && res.state !== "ERROR" && res.state !== "UNKNOWN") {
         if (RESULT_CACHE_TTL > 0) {
@@ -630,9 +634,10 @@ async function checkSingleSmart(phone, forceFresh = false) {
     } catch (e) {
       lastRes = { success: false, phone, error: e && e.message ? e.message : "TIMEOUT" };
     }
-    if (attempt < CHECK_RETRIES) {
-      const jitter = Math.floor(Math.random() * 60);
-      await new Promise(r => setTimeout(r, 60 * (attempt + 1) + jitter));
+    if (attempt < maxAttempts) {
+      const base = forceFresh ? 400 : 80;
+      const jitter = Math.floor(Math.random() * 120);
+      await new Promise(r => setTimeout(r, base * (attempt + 1) + jitter));
     }
   }
   return lastRes || { success: false, phone, error: "ɢᴀɢᴀʟ ᴍᴇɴɢʜᴜʙᴜɴɢɪ ꜱᴇʀᴠᴇʀ" };
@@ -663,13 +668,14 @@ async function checkAll(numbers, onProgress, options = {}) {
   const forceFresh = Boolean(options.forceFresh);
   const results = new Array(numbers.length);
   let idx = 0, done = 0;
-  const adaptivePool = numbers.length >= 15
+  let adaptivePool = numbers.length >= 15
     ? Math.min(18, Math.max(CONCURRENCY, 12))
     : numbers.length >= 8
       ? Math.min(14, Math.max(CONCURRENCY, 10))
       : numbers.length >= 4
         ? Math.min(10, Math.max(CONCURRENCY, 6))
         : Math.min(Math.max(1, CONCURRENCY), numbers.length);
+  if (forceFresh) adaptivePool = Math.max(1, Math.min(adaptivePool, 4));
 
   async function worker(workerId) {
     if (workerId > 0) await new Promise(r => setTimeout(r, workerId * 10));
@@ -2348,9 +2354,16 @@ function buildTempStopKeyboard() {
   return inlineKb([[btn("⏹ ꜱᴛᴏᴘ", "cancel_send", "danger")]]);
 }
 
-async function sendTempStatus(ctx, text, kb) {
+async function sendTempStatus(ctx, text, kb, { forceNew = false } = {}) {
   const userId = ctx.from.id;
   const chatId = ctx.chat.id;
+  if (!forceNew) {
+    const prev = activeInlineMsg.get(userId);
+    if (prev && prev.chatId === chatId) {
+      const edited = await safeEditMessage(ctx.telegram, chatId, prev.messageId, text, kb);
+      if (edited.ok) return prev;
+    }
+  }
   try {
     const sent = await ctx.reply(text, {
       parse_mode: "HTML",
@@ -2403,6 +2416,19 @@ function buildTempStatusText(opts) {
   return lines.join("\n");
 }
 
+async function sleepCancellable(job, totalMs, stepMs = 250) {
+  const end = Date.now() + totalMs;
+  while (!job.cancelled && Date.now() < end) {
+    if (job.abort && job.abort.signal.aborted) {
+      job.cancelled = true;
+      break;
+    }
+    const left = end - Date.now();
+    if (left <= 0) break;
+    await new Promise(r => setTimeout(r, Math.min(stepMs, left)));
+  }
+}
+
 async function runAutoSendLoop(ctx, phone, method) {
   const userId = ctx.from.id;
   const preferredMethod = String(method || "sms").toLowerCase();
@@ -2412,7 +2438,7 @@ async function runAutoSendLoop(ctx, phone, method) {
       "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ",
       "",
       `<blockquote>▸ ᴋᴜᴏᴛᴀ ɢʀᴀᴛɪꜱ ʜᴀʀɪ ɪɴɪ ʜᴀʙɪꜱ (${FREE_FEATURE_LIMIT}×).</blockquote>`
-    ].join("\n"), inlineKb([[btn("♛ ᴘʀᴇᴍɪᴜᴍ", "premium_back", "success")]]));
+    ].join("\n"), inlineKb([[btn("♛ ᴘʀᴇᴍɪᴜᴍ", "premium_back", "success")]]), { forceNew: true });
   }
   if (!access.premium) {
     await addFeatureUsed(userId, "temporary", 1);
@@ -2436,6 +2462,8 @@ async function runAutoSendLoop(ctx, phone, method) {
   let stoppedReason = null;
   let successCount = 0;
   let activeMethod = preferredMethod;
+  let consecutiveTimeouts = 0;
+  let lastSpamAt = 0;
 
   const allMethodsLocked = (methods, devOn) => {
     const m = methods || {};
@@ -2463,11 +2491,11 @@ async function runAutoSendLoop(ctx, phone, method) {
     attempt: 0,
     successCount: 0,
     footer: [
-      "ⓘ ᴋᴏᴅᴇ ᴏᴛᴘ ᴀᴋᴀɴ ᴅɪᴋɪʀɪᴍ ꜱᴇꜱᴜᴀɪ ᴍᴇᴛᴏᴅᴇ.",
-      "ⓘ ꜰᴀᴋᴇ ᴏᴛᴘ ᴅɪɪꜱɪ ᴏᴛᴏᴍᴀᴛɪꜱ ᴜɴᴛᴜᴋ ᴘᴇʀᴄᴇᴘᴀᴛ ᴛᴇᴍᴘᴏʀᴀʀʏ.",
+      "ⓘ ᴋᴏᴅᴇ ᴏᴛᴘ ᴅɪᴋɪʀɪᴍ ꜱᴇꜱᴜᴀɪ ᴍᴇᴛᴏᴅᴇ ʏᴀɴɢ ᴅɪᴘɪʟɪʜ.",
+      "ⓘ ꜰᴀᴋᴇ ᴏᴛᴘ ᴅɪɪꜱɪ ᴏᴛᴏᴍᴀᴛɪꜱ ᴜɴᴛᴜᴋ ᴘᴇʀᴄᴇᴘᴀᴛ ʟɪᴍɪᴛ.",
       "ⓘ ᴛᴇᴋᴀɴ <b>⏹ ꜱᴛᴏᴘ</b> ᴜɴᴛᴜᴋ ʙᴇʀʜᴇɴᴛɪ."
     ]
-  }), stopKb);
+  }), stopKb, { forceNew: true });
 
   while (!job.cancelled) {
     attempt += 1;
@@ -2491,7 +2519,7 @@ async function runAutoSendLoop(ctx, phone, method) {
     try {
       res = await sendVerificationCode(phone, method, {
         signal: abort.signal,
-        ignoreCooldown: attempt === 1
+        ignoreCooldown: attempt === 1 || consecutiveTimeouts > 0
       });
     } catch (e) {
       res = {
@@ -2502,7 +2530,8 @@ async function runAutoSendLoop(ctx, phone, method) {
       };
     }
     lastRes = res;
-    if (job.cancelled) {
+    if (job.cancelled || abort.signal.aborted) {
+      job.cancelled = true;
       stoppedReason = "cancelled";
       break;
     }
@@ -2519,8 +2548,16 @@ async function runAutoSendLoop(ctx, phone, method) {
     const isBanned = res.state === "BANNED" || errLow === "banned";
     const isHardFail = ["INVALID_NUMBER"].includes(String(res.state || "")) ||
       ["invalid_phone", "no_code_endpoint"].includes(errLow);
+    const isTimeout = /REQUEST_TIMEOUT|NETWORK_ERROR|HTTP_5|EMPTY_UPSTREAM|HTTP_429/i.test(errLow);
 
-    if (res.success) successCount += 1;
+    if (res.success) {
+      successCount += 1;
+      consecutiveTimeouts = 0;
+    } else if (isTimeout) {
+      consecutiveTimeouts += 1;
+    } else {
+      consecutiveTimeouts = 0;
+    }
 
     if (allMethodsLocked(methods, devOn) || (hard && allMethodsLocked(methods, devOn))) {
       stoppedReason = "locked";
@@ -2535,7 +2572,7 @@ async function runAutoSendLoop(ctx, phone, method) {
         methods,
         devOn,
         footer: "ⓘ ꜱᴇᴍᴜᴀ ᴍᴇᴛᴏᴅᴇ ᴛᴇʀᴋᴜɴᴄɪ — ɴᴏᴍᴏʀ ꜱᴜᴅᴀʜ ᴛᴇᴍᴘᴏʀᴀʀʏ."
-      }), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }));
+      }), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }), { forceNew: true });
       break;
     }
 
@@ -2552,7 +2589,7 @@ async function runAutoSendLoop(ctx, phone, method) {
         methods,
         devOn,
         footer: "ⓘ ᴄᴏᴏʟᴅᴏᴡɴ ᴋᴇʀᴀꜱ (≥10 ᴍᴇɴɪᴛ / ʟɪᴍɪᴛ ꜱᴇʀᴠᴇʀ)."
-      }), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }));
+      }), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }), { forceNew: true });
       break;
     }
 
@@ -2568,7 +2605,7 @@ async function runAutoSendLoop(ctx, phone, method) {
         methods,
         devOn,
         footer: `ⓘ ᴀʟᴀꜱᴀɴ ⦂ ${esc(res.error || res.state || "gagal")}`
-      }), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }));
+      }), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }), { forceNew: true });
       break;
     }
 
@@ -2583,12 +2620,12 @@ async function runAutoSendLoop(ctx, phone, method) {
         devOn,
         footer: "ⓘ ᴍᴇɴᴄᴏʙᴀ ᴍᴇᴛᴏᴅᴇ ʟᴀɪɴ..."
       }), stopKb);
-      await new Promise(r => setTimeout(r, 800));
+      await sleepCancellable(job, 600);
       if (job.cancelled) break;
       continue;
     }
 
-    if (res.success || (effectiveCd > 0 && effectiveCd < 600)) {
+    if (res.success || (effectiveCd > 0 && effectiveCd < 600 && !isTimeout)) {
       const waitSec = effectiveCd > 0 ? effectiveCd : 3;
       await sendTempStatus(ctx, buildTempStatusText({
         phone: res.phone || phone,
@@ -2600,18 +2637,12 @@ async function runAutoSendLoop(ctx, phone, method) {
         methods,
         devOn,
         footer: [
-          "ⓘ ᴍᴇɴᴜɴɢɢᴜ ᴊᴇᴅᴀ ꜱᴇʟᴇꜱᴀɪ · ᴛᴀɴᴘᴀ ᴀᴜᴛᴏ-ᴇᴅɪᴛ.",
+          "ⓘ ᴍᴇɴᴜɴɢɢᴜ ᴊᴇᴅᴀ ꜱᴇʟᴇꜱᴀɪ.",
           "ⓘ ᴛᴇᴋᴀɴ <b>⏹ ꜱᴛᴏᴘ</b> ᴜɴᴛᴜᴋ ʙᴇʀʜᴇɴᴛɪ."
         ]
-      }), stopKb);
+      }), stopKb, { forceNew: true });
 
-      const deadline = Date.now() + waitSec * 1000;
-      while (!job.cancelled) {
-        const remain = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
-        if (remain <= 0) break;
-        await new Promise(r => setTimeout(r, 400));
-      }
-
+      await sleepCancellable(job, waitSec * 1000, 200);
       if (job.cancelled) {
         stoppedReason = "cancelled";
         break;
@@ -2620,21 +2651,38 @@ async function runAutoSendLoop(ctx, phone, method) {
       await sendTempStatus(ctx, buildTempStatusText({
         phone: res.phone || phone,
         method,
-        lastStatus: "ᴊᴇᴅᴀ ꜱᴇʟᴇꜱᴀɪ",
+        lastStatus: "ᴊᴇᴅᴀ ꜱᴇʟᴇꜱᴀɪ · ᴍᴇɴɢɪʀɪᴍ ᴜʟᴀɴɢ",
         attempt,
         successCount,
         methods,
         devOn,
-        footer: [
-          "ⓘ ᴍᴇɴɢɪʀɪᴍ ᴜʟᴀɴɢ...",
-          "ⓘ ᴛᴇᴋᴀɴ <b>⏹ ꜱᴛᴏᴘ</b> ᴜɴᴛᴜᴋ ʙᴇʀʜᴇɴᴛɪ."
-        ]
+        footer: "ⓘ ᴛᴇᴋᴀɴ <b>⏹ ꜱᴛᴏᴘ</b> ᴜɴᴛᴜᴋ ʙᴇʀʜᴇɴᴛɪ."
       }), stopKb);
       continue;
     }
 
     const errMsg = String(res.error || res.state || "gagal");
     const retryable = /NETWORK_ERROR|REQUEST_TIMEOUT|HTTP_5|EMPTY_UPSTREAM|HTTP_429|CANCELLED/i.test(errMsg);
+
+    if (consecutiveTimeouts >= 8) {
+      stoppedReason = "failed";
+      await sendTempStatus(ctx, buildTempStatusText({
+        title: "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ ɢᴀɢᴀʟ",
+        phone: res.phone || phone,
+        method,
+        lastStatus: "ᴛɪᴍᴇᴏᴜᴛ ʙᴇʀᴜʟᴀɴɢ",
+        attempt,
+        successCount,
+        methods,
+        devOn,
+        footer: [
+          "ⓘ ᴋᴏɴᴇᴋꜱɪ ᴋᴇ ꜱᴇʀᴠᴇʀ ᴡᴀ ɢᴀɢᴀʟ ʙᴇʀᴜʟᴀɴɢ.",
+          "ⓘ ᴄᴇᴋ ᴘʀᴏxʏ / ᴄᴏʙᴀ ʟᴀɢɪ ʙᴇʙᴇʀᴀᴘᴀ ꜱᴀᴀᴛ."
+        ]
+      }), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }), { forceNew: true });
+      break;
+    }
+
     if (!retryable && attempt >= 10) {
       stoppedReason = "failed";
       await sendTempStatus(ctx, buildTempStatusText({
@@ -2647,40 +2695,32 @@ async function runAutoSendLoop(ctx, phone, method) {
         methods,
         devOn,
         footer: `ⓘ ᴀʟᴀꜱᴀɴ ⦂ ${esc(errMsg)}`
-      }), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }));
+      }), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }), { forceNew: true });
       break;
     }
 
-    await sendTempStatus(ctx, buildTempStatusText({
-      phone,
-      method,
-      lastStatus: "ᴍᴇɴɢᴜʟᴀɴɢɪ",
-      attempt,
-      successCount,
-      footer: `ⓘ ᴀʟᴀꜱᴀɴ ⦂ ${esc(errMsg)}`
-    }), stopKb);
-
-    for (let i = 0; i < 5 && !job.cancelled; i++) {
-      await new Promise(r => setTimeout(r, 300));
+    // Anti-spam: edit pesan yang sama, max 1 update tiap 4 detik
+    const now = Date.now();
+    if (now - lastSpamAt >= 4000 || attempt === 1) {
+      lastSpamAt = now;
+      await sendTempStatus(ctx, buildTempStatusText({
+        phone,
+        method,
+        lastStatus: isTimeout ? "ᴍᴇɴᴄᴏʙᴀ ᴜʟᴀɴɢ" : "ᴍᴇɴɢᴜʟᴀɴɢɪ",
+        attempt,
+        successCount,
+        footer: `ⓘ ${esc(errMsg)} · ᴛᴀɴᴘᴀ ꜱᴘᴀᴍ ᴘᴇꜱᴀɴ`
+      }), stopKb);
     }
+
+    const backoff = isTimeout
+      ? Math.min(8000, 1200 + consecutiveTimeouts * 900)
+      : 1500;
+    await sleepCancellable(job, backoff, 200);
   }
 
   if ((job.cancelled || stoppedReason === "cancelled") && stoppedReason !== "locked" && stoppedReason !== "failed") {
-    try {
-      await sendTempStatus(ctx, buildTempStatusText({
-        title: "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ ᴅɪʜᴇɴᴛɪᴋᴀɴ",
-        phone,
-        method,
-        attempt,
-        successCount,
-        methods: (lastRes && lastRes.methods) || {},
-        devOn: Boolean(lastRes && lastRes.isDeviceOn),
-        footer: "ⓘ ᴘʀᴏꜱᴇꜱ ᴅɪʜᴇɴᴛɪᴋᴀɴ."
-      }), buildSendMethodKeyboard(phone, {
-        methods: (lastRes && lastRes.methods) || {},
-        isDeviceOn: Boolean(lastRes && lastRes.isDeviceOn)
-      }));
-    } catch (_) {}
+    // UI sudah di-set di handler cancel_send; jangan spam pesan lagi
   }
 
   if (activeSendJobs.get(userId) === job) {
@@ -2735,10 +2775,10 @@ bot.action("cancel_send", async (ctx) => {
     if (job.abort) {
       try { job.abort.abort(); } catch (_) {}
     }
+    activeSendJobs.delete(userId);
   }
   awaitingSendInput.delete(userId);
-  try { await ctx.answerCbQuery("ᴅɪʜᴇɴᴛɪᴋᴀɴ"); } catch (_) {}
-  // langsung update UI — jangan tunggu loop
+  try { await ctx.answerCbQuery("⏹ ᴅɪʜᴇɴᴛɪᴋᴀɴ"); } catch (_) {}
   try {
     await editInline(ctx, [
       "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ ᴅɪʜᴇɴᴛɪᴋᴀɴ",
@@ -2746,14 +2786,14 @@ bot.action("cancel_send", async (ctx) => {
       `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(phone || "-")}</code>`,
       `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}</blockquote>`,
       "",
-      "ⓘ ᴘʀᴏꜱᴇꜱ ᴅɪʜᴇɴᴛɪᴋᴀɴ."
+      "ⓘ ᴘʀᴏꜱᴇꜱ ʟᴀɴɢꜱᴜɴɢ ᴅɪʜᴇɴᴛɪᴋᴀɴ."
     ].join("\n"), phone
       ? buildSendMethodKeyboard(phone, { methods: {}, isDeviceOn: false })
       : inlineKb([[btn("✕ ᴛᴜᴛᴜᴘ", "cancel_send", "danger")]]));
   } catch (_) {}
+  pendingSendPhone.delete(userId);
+  pendingSendMethod.delete(userId);
   if (!job) {
-    pendingSendPhone.delete(userId);
-    pendingSendMethod.delete(userId);
     try { await showPlainPanel(ctx, await buildDashboard(userId, ctx.from), false); } catch (_) {}
   }
 });
