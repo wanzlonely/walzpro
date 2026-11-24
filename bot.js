@@ -1541,7 +1541,8 @@ function buildResultKeyboard(batchId) {
     [
       btn("↻ ᴜᴘᴅᴀᴛᴇ", `det_upd_${batchId}`, "primary"),
       btn("ⓘ ɪɴꜰᴏ", `det_info_${batchId}`, "primary")
-    ]
+    ],
+    [btn("◂ ᴋᴇᴍʙᴀʟɪ", "nav_home", "primary")]
   ]);
 }
 
@@ -1550,7 +1551,8 @@ function buildEmailResultKeyboard(batchId) {
     [
       btn("↻ ᴜʟᴀɴɢ", `eml_upd_${batchId}`, "success"),
       btn("ⓘ ᴘᴀɴᴅᴜᴀɴ", `eml_info_${batchId}`, "primary")
-    ]
+    ],
+    [btn("◂ ᴋᴇᴍʙᴀʟɪ", "nav_home", "primary")]
   ]);
 }
 
@@ -2339,14 +2341,14 @@ function buildSendMethodKeyboard(phone, probe) {
   row2.push(btn("ᴇᴍᴀɪʟ", "send_email", "success"));
   rows.push(row1);
   if (row2.length) rows.push(row2);
-  rows.push([btn("✕ ʙᴀᴛᴀʟ", "cancel_send", "danger")]);
+  rows.push([btn("◂ ᴋᴇᴍʙᴀʟɪ", "nav_home", "primary"), btn("✕ ʙᴀᴛᴀʟ", "cancel_send", "danger")]);
   return inlineKb(rows);
 }
 
 function buildTempStartKeyboard(method) {
   return inlineKb([
     [btn("▶ ᴍᴜʟᴀɪ", `temp_start_${method}`, "success")],
-    [btn("✕ ʙᴀᴛᴀʟ", "cancel_send", "danger")]
+    [btn("◂ ᴋᴇᴍʙᴀʟɪ", "temp_back_methods", "primary"), btn("✕ ʙᴀᴛᴀʟ", "cancel_send", "danger")]
   ]);
 }
 
@@ -2484,18 +2486,7 @@ async function runAutoSendLoop(ctx, phone, method) {
     return Number(sec || 0) >= 600;
   };
 
-  await sendTempStatus(ctx, buildTempStatusText({
-    phone,
-    method: preferredMethod,
-    lastStatus: "ᴍᴇᴍᴜʟᴀɪ",
-    attempt: 0,
-    successCount: 0,
-    footer: [
-      "ⓘ ᴋᴏᴅᴇ ᴏᴛᴘ ᴅɪᴋɪʀɪᴍ ꜱᴇꜱᴜᴀɪ ᴍᴇᴛᴏᴅᴇ ʏᴀɴɢ ᴅɪᴘɪʟɪʜ.",
-      "ⓘ ꜰᴀᴋᴇ ᴏᴛᴘ ᴅɪɪꜱɪ ᴏᴛᴏᴍᴀᴛɪꜱ ᴜɴᴛᴜᴋ ᴘᴇʀᴄᴇᴘᴀᴛ ʟɪᴍɪᴛ.",
-      "ⓘ ᴛᴇᴋᴀɴ <b>⏹ ꜱᴛᴏᴘ</b> ᴜɴᴛᴜᴋ ʙᴇʀʜᴇɴᴛɪ."
-    ]
-  }), stopKb, { forceNew: true });
+  // Panel sudah di-edit di handler temp_start — jangan kirim pesan baru
 
   while (!job.cancelled) {
     attempt += 1;
@@ -2519,7 +2510,9 @@ async function runAutoSendLoop(ctx, phone, method) {
     try {
       res = await sendVerificationCode(phone, method, {
         signal: abort.signal,
-        ignoreCooldown: attempt === 1 || consecutiveTimeouts > 0
+        skipProbe: true,
+        forceSend: true,
+        ignoreCooldown: true
       });
     } catch (e) {
       res = {
@@ -2743,13 +2736,20 @@ bot.action(/^send_(sms|voice|flash|email|wa_old)$/i, async (ctx) => {
   }
   pendingSendMethod.set(userId, method);
   return editInline(ctx, [
-    "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ — ᴋᴏɴꜰɪʀᴍᴀꜱɪ",
+    "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ",
     "",
-    `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(phone)}</code>`,
-    `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}</blockquote>`,
+    "<blockquote>" +
+    `▸ ɴᴏᴍᴏʀ   ⦂ <code>${esc(phone)}</code>\n` +
+    `▸ ᴍᴇᴛᴏᴅᴇ  ⦂ <b>${methodLabel(method)}</b>\n` +
+    "▸ ᴍᴏᴅᴇ    ⦂ ᴀᴜᴛᴏ ꜱᴀᴍᴘᴀɪ ʟɪᴍɪᴛ" +
+    "</blockquote>",
     "",
-    "ⓘ ᴛᴇᴋᴀɴ <b>▶ ᴍᴜʟᴀɪ</b> ᴜɴᴛᴜᴋ ᴍᴇɴᴊᴀʟᴀɴᴋᴀɴ ꜱᴀᴍᴘᴀɪ ɴᴏᴍᴏʀ ᴛᴇʀᴋᴜɴᴄɪ.",
-    "   ᴘʀᴏꜱᴇꜱ ʙɪꜱᴀ ᴅɪʜᴇɴᴛɪᴋᴀɴ ᴋᴀᴘᴀɴ ꜱᴀᴊᴀ ᴅᴇɴɢᴀɴ <b>⏹ ꜱᴛᴏᴘ</b>."
+    "◈ ᴀᴋꜱɪ",
+    "<blockquote>" +
+    "▶ ᴍᴜʟᴀɪ — ᴋɪʀɪᴍ ᴋᴏᴅᴇ ᴏᴛᴘ ʙᴇʀᴜʟᴀɴɢ\n" +
+    "◂ ᴋᴇᴍʙᴀʟɪ — ᴘɪʟɪʜ ᴍᴇᴛᴏᴅᴇ ʟᴀɪɴ\n" +
+    "⏹ ꜱᴛᴏᴘ — ʜᴇɴᴛɪᴋᴀɴ ꜱᴀᴀᴛ ʙᴇʀᴊᴀʟᴀɴ" +
+    "</blockquote>"
   ].join("\n"), buildTempStartKeyboard(method));
 });
 
@@ -2762,7 +2762,39 @@ bot.action(/^temp_start_(sms|voice|flash|email|wa_old)$/i, async (ctx) => {
     return editInline(ctx, "⚠ ɴᴏᴍᴏʀ ᴛɪᴅᴀᴋ ᴅɪᴛᴇᴍᴜᴋᴀɴ. ᴜʟᴀɴɢɪ ᴅᴀʀɪ ᴍᴇɴᴜ ᴛᴇᴍᴘᴏʀᴀʀʏ.", inlineKb([[btn("✕ ᴛᴜᴛᴜᴘ", "cancel_send", "danger")]]));
   }
   pendingSendMethod.set(userId, method);
+  // Auto-edit panel konfirmasi → status mulai (tanpa pesan baru)
+  try {
+    await editInline(ctx, buildTempStatusText({
+      phone,
+      method,
+      lastStatus: "ᴍᴇᴍᴜʟᴀɪ",
+      attempt: 0,
+      successCount: 0,
+      footer: [
+        "ⓘ ᴍᴇɴɢɪʀɪᴍ ᴘᴇʀᴍɪɴᴛᴀᴀɴ ᴋᴏᴅᴇ ᴏᴛᴘ...",
+        "ⓘ ᴛᴇᴋᴀɴ <b>⏹ ꜱᴛᴏᴘ</b> ᴜɴᴛᴜᴋ ʙᴇʀʜᴇɴᴛɪ."
+      ]
+    }), buildTempStopKeyboard());
+  } catch (_) {}
   return runAutoSendLoop(ctx, phone, method);
+});
+
+bot.action("temp_back_methods", async (ctx) => {
+  const userId = ctx.from.id;
+  const phone = pendingSendPhone.get(userId);
+  await ctx.answerCbQuery();
+  if (!phone) {
+    return editInline(ctx, "⚠ ɴᴏᴍᴏʀ ᴛɪᴅᴀᴋ ᴅɪᴛᴇᴍᴜᴋᴀɴ.", inlineKb([[btn("✕ ᴛᴜᴛᴜᴘ", "cancel_send", "danger")]]));
+  }
+  const probe = { methods: {}, isDeviceOn: false };
+  return editInline(ctx, [
+    "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ",
+    "",
+    `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(phone)}</code>`,
+    "▸ ᴘɪʟɪʜ ᴍᴇᴛᴏᴅᴇ ᴋɪʀɪᴍ ᴏᴛᴘ</blockquote>",
+    "",
+    "ⓘ ᴘɪʟɪʜ ꜱᴀʟᴀʜ ꜱᴀᴛᴜ ᴍᴇᴛᴏᴅᴇ, ʟᴀʟᴜ ᴛᴇᴋᴀɴ ▶ ᴍᴜʟᴀɪ."
+  ].join("\n"), buildSendMethodKeyboard(phone, probe));
 });
 
 bot.action("cancel_send", async (ctx) => {
@@ -2798,6 +2830,21 @@ bot.action("cancel_send", async (ctx) => {
   }
 });
 
+
+bot.action("nav_home", async (ctx) => {
+  const userId = ctx.from.id;
+  await ctx.answerCbQuery();
+  awaitingInput.delete(userId);
+  awaitingEmailInput.delete(userId);
+  awaitingSendInput.delete(userId);
+  try {
+    await showPlainPanel(ctx, await buildDashboard(userId, ctx.from), false);
+  } catch (_) {
+    try {
+      await editInline(ctx, await buildDashboard(userId, ctx.from), inlineKb([]));
+    } catch (__) {}
+  }
+});
 bot.action("referral", async (ctx) => {
   const userId = ctx.from.id;
   await ctx.answerCbQuery();
