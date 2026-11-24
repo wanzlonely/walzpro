@@ -47,7 +47,7 @@ const REWARDS = [
 const MENU_LABELS = {
   DETECT: "◈ ᴅᴇᴛᴇᴋꜱɪ ɴᴏᴍᴏʀ",
   EMAIL_FIX: "✦ ᴍᴜɴᴄᴜʟᴋᴀɴ ᴇᴍᴀɪʟ",
-  SEND_CODE: "✧ ᴋɪʀɪᴍ ᴋᴏᴅᴇ",
+  SEND_CODE: "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ",
   STATUS: "◈ ꜱᴛᴀᴛᴜꜱ ꜱᴀʏᴀ",
   REFERRAL: "❖ ʀᴇꜰᴇʀᴀʟ",
   PREMIUM: "♛ ʙᴇʟɪ ᴘʀᴇᴍɪᴜᴍ",
@@ -355,6 +355,31 @@ async function addUsed(id, n) {
   const key = `usage:${id}:${today()}`;
   await redis.incrby(key, n);
   await redis.expire(key, 172800);
+}
+
+async function getFeatureUsed(id, feature) {
+  const v = await redis.get(`usage:${feature}:${id}:${today()}`);
+  return v ? Number(v) : 0;
+}
+
+async function addFeatureUsed(id, feature, n = 1) {
+  const key = `usage:${feature}:${id}:${today()}`;
+  await redis.incrby(key, n);
+  await redis.expire(key, 172800);
+}
+
+const FREE_FEATURE_LIMIT = parseInt(process.env.FREE_FEATURE_LIMIT || process.env.FREE_DAILY_LIMIT || "3", 10);
+
+async function assertFeatureAccess(userId, feature) {
+  if (ADMIN_IDS.includes(Number(userId))) return { ok: true, premium: true, remaining: 999 };
+  const premium = await isPremiumUser(userId);
+  if (premium) return { ok: true, premium: true, remaining: 999 };
+  const used = await getFeatureUsed(userId, feature);
+  const remaining = FREE_FEATURE_LIMIT - used;
+  if (remaining <= 0) {
+    return { ok: false, premium: false, remaining: 0, used };
+  }
+  return { ok: true, premium: false, remaining, used };
 }
 
 async function isPremiumUser(id) {
@@ -1272,8 +1297,12 @@ function buildDetectionOutput(numbers, results, elapsedSec = null) {
     blocks.push(`✧ ꜱɪᴀᴘ ᴅɪᴠᴇʀɪꜰɪᴋᴀꜱɪ\n<blockquote>${items.join("\n")}</blockquote>`);
   }
   if (smsLimit.length) {
-    const items = smsLimit.map(r => `⟢ <code>${esc(r.phone)}</code> ⦂ ʟɪᴍɪᴛ ꜱᴍꜱ ${displayCD(r)} · ${deviceBadge(r)}`);
-    blocks.push(`◎ ʟɪᴍɪᴛ ꜱᴍꜱ (ᴍᴇᴛᴏᴅᴇ ʟᴀɪɴ ʙɪꜱᴀ ᴊᴀᴅɪ ᴍᴀꜱɪʜ ᴛᴇʀꜱᴇᴅɪᴀ)\n<blockquote>${items.join("\n")}</blockquote>`);
+    const items = smsLimit.map(r => `⟢ <code>${esc(r.phone)}</code> ⦂ ᴊᴇᴅᴀ ${displayCD(r)} · ${deviceBadge(r)}`);
+    blocks.push(`◎ ᴊᴇᴅᴀ ᴍᴇᴛᴏᴅᴇ (ʙᴜᴋᴀɴ ᴄᴏᴏʟᴅᴏᴡɴ ᴘᴇɴᴜʜ)\n<blockquote>${items.join("\n")}</blockquote>`);
+  }
+  if (inUse.length) {
+    const items = inUse.map(r => `⟢ <code>${esc(r.phone)}</code> ⦂ ꜱᴇᴅᴀɴɢ ᴅɪᴠᴇʀɪꜰɪᴋᴀꜱɪ · ${deviceBadge(r)}`);
+    blocks.push(`↻ ꜱᴇᴅᴀɴɢ ᴅɪᴠᴇʀɪꜰɪᴋᴀꜱɪ ᴏʀᴀɴɢ ʟᴀɪɴ\n<blockquote>${items.join("\n")}</blockquote>`);
   }
   if (cooldown.length) {
     const items = cooldown.map(r => `⟢ <code>${esc(r.phone)}</code> ⦂ ${displayCD(r)} · ${deviceBadge(r)}`);
@@ -1546,19 +1575,21 @@ async function processEmailFix(ctx, rawInput) {
     ].join("\n"), inlineKb([[btn("✕ ʙᴀᴛᴀʟᴋᴀɴ", "cancel_email", "danger")]]), false);
   }
 
-  const premium = await isPremiumUser(userId);
-  const used = await getUsed(userId);
-
+  const access = await assertFeatureAccess(userId, "email");
+  if (!access.ok) {
+    return ctx.reply(`⚠ ᴋᴜᴏᴛᴀ ᴍᴜɴᴄᴜʟᴋᴀɴ ᴇᴍᴀɪʟ ɢʀᴀᴛɪꜱ ʜᴀʀɪ ɪɴɪ ʜᴀʙɪꜱ (${FREE_FEATURE_LIMIT}x). ᴜᴘɢʀᴀᴅᴇ ᴘʀᴇᴍɪᴜᴍ ᴜɴᴛᴜᴋ ʟᴀɴᴊᴜᴛ.`, mainKeyboard(userId));
+  }
+  const premium = access.premium;
   if (premium) {
     if (numbers.length > PREMIUM_BATCH_LIMIT) {
       return ctx.reply(`⚠ ᴍᴀᴋꜱɪᴍᴀʟ ${PREMIUM_BATCH_LIMIT} ɴᴏᴍᴏʀ ᴘᴇʀ ᴘᴇᴍᴇʀɪᴋꜱᴀᴀɴ ᴜɴᴛᴜᴋ ᴘʀᴇᴍɪᴜᴍ`, mainKeyboard(userId));
     }
   } else {
-    const remaining = FREE_DAILY_LIMIT - used;
-    if (remaining <= 0) return ctx.reply(`⚠ ᴋᴜᴏᴛᴀ ʜᴀʀɪᴀɴ ᴀɴᴅᴀ (${FREE_DAILY_LIMIT} ɴᴏᴍᴏʀ) ʜᴀʙɪꜱ`, mainKeyboard(userId));
-    if (numbers.length > remaining) {
-      return ctx.reply(`⚠ ꜱɪꜱᴀ ᴋᴜᴏᴛᴀ ʜᴀʀɪ ɪɴɪ ⦂ ${remaining} ɴᴏᴍᴏʀ\n⚠ ᴀɴᴅᴀ ᴍᴇɴɢɪʀɪᴍ ${numbers.length} ɴᴏᴍᴏʀ`, mainKeyboard(userId));
+    if (numbers.length > access.remaining) {
+      return ctx.reply(`⚠ ꜱɪꜱᴀ ᴋᴜᴏᴛᴀ ᴇᴍᴀɪʟ ʜᴀʀɪ ɪɴɪ ⦂ ${access.remaining}
+⚠ ᴀɴᴅᴀ ᴍᴇɴɢɪʀɪᴍ ${numbers.length} ɴᴏᴍᴏʀ`, mainKeyboard(userId));
     }
+    await addFeatureUsed(userId, "email", numbers.length);
   }
 
   const startedAt = Date.now();
@@ -1790,11 +1821,23 @@ bot.hears(MENU_LABELS.EMAIL_FIX, async (ctx) => {
   awaitingInput.delete(userId);
   awaitingSendInput.delete(userId);
   adminState.delete(userId);
+  const access = await assertFeatureAccess(userId, "email");
+  if (!access.ok) {
+    return showInlinePanel(ctx, [
+      "✦ ᴍᴜɴᴄᴜʟᴋᴀɴ ᴇᴍᴀɪʟ",
+      "",
+      `<blockquote>▸ ᴋᴜᴏᴛᴀ ɢʀᴀᴛɪꜱ ʜᴀʀɪ ɪɴɪ ʜᴀʙɪꜱ (${FREE_FEATURE_LIMIT}x).`,
+      "▸ ᴜᴘɢʀᴀᴅᴇ ᴘʀᴇᴍɪᴜᴍ ᴜɴᴛᴜᴋ ᴀᴋꜱᴇꜱ ᴛᴀɴᴘᴀ ʙᴀᴛᴀꜱ.</blockquote>"
+    ].join("\n"), inlineKb([
+      [btn("♛ ᴘʀᴇᴍɪᴜᴍ", "premium_back", "success")],
+      [btn("✕ ᴛᴜᴛᴜᴘ", "cancel_email", "danger")]
+    ]), true);
+  }
   awaitingEmailInput.add(userId);
   await showInlinePanel(
     ctx,
     await buildEmailPrompt(userId, ctx.from),
-    inlineKb([[btn("✕ ʙᴀᴛᴀʟᴋᴀɴ", "cancel_email", "danger")]]),
+    inlineKb([[btn("✕ ʙᴀᴛᴀʟ", "cancel_email", "danger")]]),
     true
   );
 });
@@ -1804,17 +1847,33 @@ bot.hears(MENU_LABELS.SEND_CODE, async (ctx) => {
   awaitingInput.delete(userId);
   awaitingEmailInput.delete(userId);
   adminState.delete(userId);
+  const access = await assertFeatureAccess(userId, "temporary");
+  if (!access.ok) {
+    return showInlinePanel(ctx, [
+      "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ",
+      "",
+      `<blockquote>▸ ᴋᴜᴏᴛᴀ ɢʀᴀᴛɪꜱ ʜᴀʀɪ ɪɴɪ ʜᴀʙɪꜱ (${FREE_FEATURE_LIMIT}x).`,
+      "▸ ᴜᴘɢʀᴀᴅᴇ ᴘʀᴇᴍɪᴜᴍ ᴜɴᴛᴜᴋ ᴀᴋꜱᴇꜱ ᴛᴀɴᴘᴀ ʙᴀᴛᴀꜱ.</blockquote>"
+    ].join("\n"), inlineKb([
+      [btn("♛ ᴘʀᴇᴍɪᴜᴍ", "premium_back", "success")],
+      [btn("✕ ᴛᴜᴛᴜᴘ", "cancel_send", "danger")]
+    ]), true);
+  }
   awaitingSendInput.add(userId);
+  const quotaLine = access.premium
+    ? "▸ ᴀᴋꜱᴇꜱ ⦂ ᴘʀᴇᴍɪᴜᴍ (ᴜɴʟɪᴍɪᴛᴇᴅ)"
+    : `▸ ꜱɪꜱᴀ ᴋᴜᴏᴛᴀ ɢʀᴀᴛɪꜱ ⦂ ${access.remaining}/${FREE_FEATURE_LIMIT}`;
   await showInlinePanel(
     ctx,
     [
-      "✧ ᴋɪʀɪᴍ ᴋᴏᴅᴇ",
+      "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ",
       "",
       "<blockquote>⟡ ᴋɪʀɪᴍ <b>1 ɴᴏᴍᴏʀ</b> ᴛᴀʀɢᴇᴛ.",
       "⊹ ʙᴏᴛ ᴄᴇᴋ ꜱᴛᴀᴛᴜꜱ + ᴍᴇᴛᴏᴅᴇ ʏᴀɴɢ ᴛᴇʀꜱᴇᴅɪᴀ.",
-      "⊹ ᴘɪʟɪʜ ᴍᴇᴛᴏᴅᴇ → ʙᴏᴛ ᴋɪʀɪᴍ ᴏᴛᴏᴍᴀᴛɪꜱ ꜱᴀᴍᴘᴀɪ ɴᴏᴍᴏʀ ᴛᴇᴍᴘᴏʀᴀʀʏ.</blockquote>"
+      "⊹ ᴘɪʟɪʜ ᴍᴇᴛᴏᴅᴇ → ᴋɪʀɪᴍ ᴏᴛᴏᴍᴀᴛɪꜱ ꜱᴀᴍᴘᴀɪ ᴛᴇᴍᴘᴏʀᴀʀʏ.",
+      quotaLine + "</blockquote>"
     ].join("\n"),
-    inlineKb([[btn("✕ ʙᴀᴛᴀʟᴋᴀɴ", "cancel_send", "danger")]]),
+    inlineKb([[btn("✕ ʙᴀᴛᴀʟ", "cancel_send", "danger")]]),
     true
   );
 });
@@ -2166,11 +2225,26 @@ function buildSendMethodKeyboard(phone, probe) {
 
 async function runAutoSendLoop(ctx, phone, method) {
   const userId = ctx.from.id;
-  const jobId = `${userId}:${String(phone).replace(/\D/g, "")}:${method}`;
-  if (activeSendJobs.has(userId)) {
-    activeSendJobs.get(userId).cancelled = true;
+  const access = await assertFeatureAccess(userId, "temporary");
+  if (!access.ok) {
+    return editInline(ctx, [
+      "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ",
+      "",
+      `<blockquote>▸ ᴋᴜᴏᴛᴀ ɢʀᴀᴛɪꜱ ʜᴀʀɪ ɪɴɪ ʜᴀʙɪꜱ (${FREE_FEATURE_LIMIT}x).</blockquote>`
+    ].join("\n"), inlineKb([[btn("♛ ᴘʀᴇᴍɪᴜᴍ", "premium_back", "success")]]));
   }
-  const job = { cancelled: false, jobId };
+  if (!access.premium) {
+    await addFeatureUsed(userId, "temporary", 1);
+  }
+  if (activeSendJobs.has(userId)) {
+    const prev = activeSendJobs.get(userId);
+    prev.cancelled = true;
+    if (prev.abort) {
+      try { prev.abort.abort(); } catch (_) {}
+    }
+  }
+  const abort = new AbortController();
+  const job = { cancelled: false, abort };
   activeSendJobs.set(userId, job);
   pendingSendPhone.set(userId, phone);
   pendingSendMethod.set(userId, method);
@@ -2182,20 +2256,34 @@ async function runAutoSendLoop(ctx, phone, method) {
 
   while (!job.cancelled) {
     attempt += 1;
-    await editInline(ctx, [
-      "✧ ᴋɪʀɪᴍ ᴋᴏᴅᴇ — ᴏᴛᴏᴍᴀᴛɪꜱ",
-      "",
-      `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(phone)}</code>`,
-      `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
-      `▸ ᴘᴇʀᴄᴏʙᴀᴀɴ ⦂ #${attempt}`,
-      "▸ ꜱᴛᴀᴛᴜꜱ ⦂ ᴍᴇɴɢɪʀɪᴍ...</blockquote>",
-      "",
-      "ⓘ ᴘʀᴏꜱᴇꜱ ʙᴇʀᴊᴀʟᴀɴ ꜱᴀᴍᴘᴀɪ ɴᴏᴍᴏʀ ᴛᴇᴍᴘᴏʀᴀʀʏ ᴀᴛᴀᴜ ᴅɪʙᴀᴛᴀʟᴋᴀɴ."
-    ].join("\n"), cancelKb);
+    try {
+      await editInline(ctx, [
+        "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ — ᴏᴛᴏᴍᴀᴛɪꜱ",
+        "",
+        `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(phone)}</code>`,
+        `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
+        `▸ ᴘᴇʀᴄᴏʙᴀᴀɴ ⦂ #${attempt}`,
+        "▸ ꜱᴛᴀᴛᴜꜱ ⦂ ᴍᴇɴɢɪʀɪᴍ...</blockquote>",
+        "",
+        "ⓘ ᴘʀᴏꜱᴇꜱ ʙᴇʀᴊᴀʟᴀɴ ꜱᴀᴍᴘᴀɪ ɴᴏᴍᴏʀ ᴛᴇᴍᴘᴏʀᴀʀʏ ᴀᴛᴀᴜ ᴅɪʙᴀᴛᴀʟᴋᴀɴ."
+      ].join("\n"), cancelKb);
+    } catch (_) {}
 
-    const res = await sendVerificationCode(phone, method, { skipProbe: attempt > 1, ignoreCooldown: false });
+    let res;
+    try {
+      res = await sendVerificationCode(phone, method, {
+        skipProbe: attempt > 1,
+        ignoreCooldown: false,
+        signal: abort.signal
+      });
+    } catch (e) {
+      res = { success: false, phone, method, error: String(e && e.message ? e.message : e) };
+    }
     lastRes = res;
-    if (job.cancelled) break;
+    if (job.cancelled || (res && res.error === "CANCELLED")) {
+      stoppedReason = "cancelled";
+      break;
+    }
 
     const methods = res.methods || (res.probe && res.probe.methods) || {};
     const devOn = Boolean(res.isDeviceOn || (res.probe && res.probe.isDeviceOn));
@@ -2203,19 +2291,21 @@ async function runAutoSendLoop(ctx, phone, method) {
     const methodWait = numWaitSafe(methods[method]);
     const effectiveCd = methodWait || cd;
 
-    const isTemp = res.state === "COOLDOWN" || effectiveCd >= 60 || (res.success && effectiveCd > 0);
+    const isTemp = res.state === "COOLDOWN" || res.state === "SMS_LIMIT" || effectiveCd >= 60 || (res.success && effectiveCd > 0);
     const isBanned = res.state === "BANNED" || res.error === "banned";
     const isHardFail = ["BANNED", "FAILED", "NO_DEVICE", "INVALID_NUMBER"].includes(String(res.state || "")) ||
       ["banned", "wa_old_not_available", "invalid_phone", "no_code_endpoint"].includes(String(res.error || ""));
 
-    if (res.success || isTemp) {
-      stoppedReason = res.success && effectiveCd > 0 ? "temporary" : (isTemp ? "temporary" : "sent");
-      const statusText = res.success
-        ? (effectiveCd > 0 ? `ᴛᴇʀᴋɪʀɪᴍ · ᴛᴇᴍᴘᴏʀᴀʀʏ ${formatCooldown(effectiveCd)}` : "ᴛᴇʀᴋɪʀɪᴍ")
-        : `ᴛᴇᴍᴘᴏʀᴀʀʏ ${formatCooldown(effectiveCd)}`;
+    if (res.success && (res.state === "SENT" || isTemp || effectiveCd > 0)) {
+      stoppedReason = effectiveCd > 0 ? "temporary" : "sent";
+      const statusText = effectiveCd >= 600
+        ? `ᴛᴇᴍᴘᴏʀᴀʀʏ ${formatCooldown(effectiveCd)}`
+        : (effectiveCd > 0
+          ? `ᴛᴇʀᴋɪʀɪᴍ · ᴊᴇᴅᴀ ${formatCooldown(effectiveCd)}`
+          : "ᴛᴇʀᴋɪʀɪᴍ");
 
       await editInline(ctx, [
-        "✧ ʜᴀꜱɪʟ ᴋɪʀɪᴍ ᴋᴏᴅᴇ",
+        "✧ ʜᴀꜱɪʟ ᴛᴇᴍᴘᴏʀᴀʀʏ",
         "",
         `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(res.phone || phone)}</code>`,
         `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
@@ -2226,9 +2316,9 @@ async function runAutoSendLoop(ctx, phone, method) {
         "◈ ꜱᴛᴀᴛᴜꜱ ᴍᴇᴛᴏᴅᴇ",
         `<blockquote>${formatMethodsBlock(methods, devOn)}</blockquote>`,
         "",
-        res.success
-          ? "ⓘ ᴋᴏᴅᴇ ʙᴇʀʜᴀꜱɪʟ ᴅɪᴋɪʀɪᴍ ʟᴇᴡᴀᴛ ᴇɴᴅᴘᴏɪɴᴛ ʀᴇꜱᴍɪ ᴡᴀ."
-          : "ⓘ ɴᴏᴍᴏʀ ꜱᴜᴅᴀʜ ᴅᴀʟᴀᴍ ꜱᴛᴀᴛᴜꜱ ᴛᴇᴍᴘᴏʀᴀʀʏ / ᴊᴇᴅᴀ."
+        effectiveCd > 0
+          ? "ⓘ ɴᴏᴍᴏʀ ꜱᴜᴅᴀʜ ᴍᴀꜱᴜᴋ ᴊᴇᴅᴀ / ᴛᴇᴍᴘᴏʀᴀʀʏ."
+          : "ⓘ ᴋᴏᴅᴇ ʙᴇʀʜᴀꜱɪʟ ᴅɪᴋɪʀɪᴍ ʟᴇᴡᴀᴛ ᴇɴᴅᴘᴏɪɴᴛ ʀᴇꜱᴍɪ ᴡᴀ."
       ].join("\n"), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }));
       break;
     }
@@ -2236,7 +2326,7 @@ async function runAutoSendLoop(ctx, phone, method) {
     if (isBanned || isHardFail) {
       stoppedReason = "failed";
       await editInline(ctx, [
-        "✧ ʜᴀꜱɪʟ ᴋɪʀɪᴍ ᴋᴏᴅᴇ",
+        "✧ ʜᴀꜱɪʟ ᴛᴇᴍᴘᴏʀᴀʀʏ",
         "",
         `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(res.phone || phone)}</code>`,
         `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
@@ -2251,11 +2341,11 @@ async function runAutoSendLoop(ctx, phone, method) {
     }
 
     const errMsg = String(res.error || res.state || "gagal");
-    const retryable = /NETWORK_ERROR|REQUEST_TIMEOUT|HTTP_5|EMPTY_UPSTREAM|method_cooldown/i.test(errMsg);
-    if (!retryable || attempt >= 12) {
+    const retryable = /NETWORK_ERROR|REQUEST_TIMEOUT|HTTP_5|EMPTY_UPSTREAM|HTTP_429/i.test(errMsg);
+    if (!retryable || attempt >= 15) {
       stoppedReason = "failed";
       await editInline(ctx, [
-        "✧ ʜᴀꜱɪʟ ᴋɪʀɪᴍ ᴋᴏᴅᴇ",
+        "✧ ʜᴀꜱɪʟ ᴛᴇᴍᴘᴏʀᴀʀʏ",
         "",
         `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(res.phone || phone)}</code>`,
         `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
@@ -2270,30 +2360,34 @@ async function runAutoSendLoop(ctx, phone, method) {
       break;
     }
 
-    await editInline(ctx, [
-      "✧ ᴋɪʀɪᴍ ᴋᴏᴅᴇ — ᴍᴇɴɢᴜʟᴀɴɢɪ",
-      "",
-      `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(phone)}</code>`,
-      `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
-      `▸ ᴘᴇʀᴄᴏʙᴀᴀɴ ⦂ #${attempt}`,
-      `▸ ᴀʟᴀꜱᴀɴ ⦂ ${esc(errMsg)}</blockquote>`,
-      "",
-      "ⓘ ᴍᴇɴᴄᴏʙᴀ ᴜʟᴀɴɢ ᴏᴛᴏᴍᴀᴛɪꜱ..."
-    ].join("\n"), cancelKb);
+    try {
+      await editInline(ctx, [
+        "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ — ᴍᴇɴɢᴜʟᴀɴɢɪ",
+        "",
+        `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(phone)}</code>`,
+        `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
+        `▸ ᴘᴇʀᴄᴏʙᴀᴀɴ ⦂ #${attempt}`,
+        `▸ ᴀʟᴀꜱᴀɴ ⦂ ${esc(errMsg)}</blockquote>`,
+        "",
+        "ⓘ ᴍᴇɴᴄᴏʙᴀ ᴜʟᴀɴɢ ᴏᴛᴏᴍᴀᴛɪꜱ..."
+      ].join("\n"), cancelKb);
+    } catch (_) {}
 
-    await new Promise(r => setTimeout(r, 1500 + Math.min(attempt, 5) * 400));
+    await new Promise(r => setTimeout(r, 1200 + Math.min(attempt, 6) * 350));
   }
 
-  if (job.cancelled && stoppedReason === null) {
+  if ((job.cancelled || stoppedReason === "cancelled") && stoppedReason !== "temporary" && stoppedReason !== "sent" && stoppedReason !== "failed") {
     const methods = (lastRes && lastRes.methods) || {};
     const devOn = Boolean(lastRes && (lastRes.isDeviceOn || (lastRes.probe && lastRes.probe.isDeviceOn)));
-    await editInline(ctx, [
-      "✧ ᴋɪʀɪᴍ ᴋᴏᴅᴇ ᴅɪʙᴀᴛᴀʟᴋᴀɴ",
-      "",
-      `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(phone)}</code>`,
-      `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
-      `▸ ᴘᴇʀᴄᴏʙᴀᴀɴ ⦂ ${attempt}x</blockquote>`
-    ].join("\n"), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }));
+    try {
+      await editInline(ctx, [
+        "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ ᴅɪʙᴀᴛᴀʟᴋᴀɴ",
+        "",
+        `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(phone)}</code>`,
+        `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
+        `▸ ᴘᴇʀᴄᴏʙᴀᴀɴ ⦂ ${attempt}x</blockquote>`
+      ].join("\n"), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }));
+    } catch (_) {}
   }
 
   if (activeSendJobs.get(userId) === job) {
@@ -2321,12 +2415,17 @@ bot.action(/^send_(sms|voice|flash|email|wa_old)$/i, async (ctx) => {
 bot.action("cancel_send", async (ctx) => {
   const userId = ctx.from.id;
   const job = activeSendJobs.get(userId);
-  if (job) job.cancelled = true;
+  if (job) {
+    job.cancelled = true;
+    if (job.abort) {
+      try { job.abort.abort(); } catch (_) {}
+    }
+  }
   awaitingSendInput.delete(userId);
-  pendingSendPhone.delete(userId);
-  pendingSendMethod.delete(userId);
   await ctx.answerCbQuery("ᴅɪʙᴀᴛᴀʟᴋᴀɴ");
   if (!job) {
+    pendingSendPhone.delete(userId);
+    pendingSendMethod.delete(userId);
     await showPlainPanel(ctx, await buildDashboard(userId, ctx.from), false);
   }
 });
