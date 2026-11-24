@@ -1189,7 +1189,7 @@ function splitBlocksIntoChunks(blocks, maxLen = 3800) {
 }
 
 function summarizeProgress(results, total) {
-  let ready = 0, smsLimit = 0, cooldown = 0, clone = 0, banned = 0, failed = 0, done = 0;
+  let ready = 0, cooldown = 0, inUse = 0, clone = 0, banned = 0, failed = 0, done = 0;
   let devOn = 0, devOff = 0;
   for (const r of results) {
     if (!r) continue;
@@ -1199,11 +1199,14 @@ function summarizeProgress(results, total) {
     if (st === "ERROR" || st === "INVALID_NUMBER" || st === "UNKNOWN") { failed++; continue; }
     if (isDeviceOn(r)) devOn++;
     else devOff++;
-    if (r.isBanned) { banned++; continue; }
-    if (r.isCloneBlocked) { clone++; continue; }
-    if (r.isSmsLimited || st === "SMS_LIMIT") { smsLimit++; continue; }
-    if (r.isCooldown) { cooldown++; continue; }
-    if (r.isReady) { ready++; continue; }
+    if (r.isBanned || st === "BANNED") { banned++; continue; }
+    if (r.isCloneBlocked || st === "CLONE_BLOCKED") { clone++; continue; }
+    if (r.isInUse || st === "IN_USE") { inUse++; continue; }
+    if (r.isCooldown || r.isSmsLimited || st === "COOLDOWN" || st === "SMS_LIMIT" || Number(r.cooldownSeconds || 0) > 0) {
+      cooldown++;
+      continue;
+    }
+    if (r.isReady || st === "READY") { ready++; continue; }
     failed++;
   }
   const pct = total > 0 ? Math.round(done * 100 / total) : 0;
@@ -1212,9 +1215,15 @@ function summarizeProgress(results, total) {
     "",
     `<blockquote>◈ ${bar(pct)} ${pct}%`,
     `⟡ ᴘʀᴏɢʀᴇꜱ ⦂ ${done} / ${total} ɴᴏᴍᴏʀ`,
-    `✧ ꜱɪᴀᴘ ⦂ ${ready} · ◎ ʟɪᴍɪᴛ ꜱᴍꜱ ⦂ ${smsLimit} · ◐ ᴄᴅ ⦂ ${cooldown}`,
-    `△ ᴄʟᴏɴᴇ ⦂ ${clone} · ✕ ʙᴀɴɴᴇᴅ ⦂ ${banned}`,
-    `● ᴏɴ-ᴅᴇᴠɪᴄᴇ ⦂ ${devOn} · ○ ᴏꜰꜰ-ᴅᴇᴠɪᴄᴇ ⦂ ${devOff}`
+    "",
+    `✧ ꜱɪᴀᴘ ⦂ ${ready}`,
+    `◐ ᴄᴏᴏʟᴅᴏᴡɴ ⦂ ${cooldown}`,
+    `↻ ꜱᴇᴅᴀɴɢ ᴅɪᴠᴇʀɪꜰɪᴋᴀꜱɪ ⦂ ${inUse}`,
+    `△ ᴄʟᴏɴᴇ ⦂ ${clone}`,
+    `✕ ʙᴀɴɴᴇᴅ ⦂ ${banned}`,
+    "",
+    `● ᴏɴ-ᴅᴇᴠɪᴄᴇ ⦂ ${devOn}`,
+    `○ ᴏꜰꜰ-ᴅᴇᴠɪᴄᴇ ⦂ ${devOff}`
   ];
   if (failed > 0) lines.push(`⚠ ɢᴀɢᴀʟ ⦂ ${failed}`);
   lines[lines.length - 1] += "</blockquote>";
@@ -1244,8 +1253,14 @@ function summarizeEmailProgress(results, total) {
 }
 
 function buildDetectionOutput(numbers, results, elapsedSec = null) {
-  const ready = [], smsLimit = [], cooldown = [], clone = [], banned = [], errors = [];
-  let devOn = 0, devOff = 0;
+  const ready = [];
+  const cooldown = [];
+  const inUse = [];
+  const clone = [];
+  const banned = [];
+  const errors = [];
+  let devOn = 0;
+  let devOff = 0;
 
   results.forEach((r, i) => {
     const fb = numbers[i];
@@ -1265,11 +1280,27 @@ function buildDetectionOutput(numbers, results, elapsedSec = null) {
     if (isDeviceOn(r)) devOn++;
     else devOff++;
 
-    if (r.isBanned) { banned.push(r); return; }
-    if (r.isCloneBlocked) { clone.push(r); return; }
-    if (r.isSmsLimited || st === "SMS_LIMIT") { smsLimit.push(r); return; }
-    if (r.isCooldown) { cooldown.push(r); return; }
-    if (r.isReady) { ready.push(r); return; }
+    if (r.isBanned || st === "BANNED") {
+      banned.push(r);
+      return;
+    }
+    if (r.isCloneBlocked || st === "CLONE_BLOCKED") {
+      clone.push(r);
+      return;
+    }
+    if (r.isInUse || st === "IN_USE") {
+      inUse.push(r);
+      return;
+    }
+    // Semua jeda (termasuk ~5m) masuk cooldown keras — sulit diverifikasi
+    if (r.isCooldown || r.isSmsLimited || st === "COOLDOWN" || st === "SMS_LIMIT" || Number(r.cooldownSeconds || 0) > 0) {
+      cooldown.push(r);
+      return;
+    }
+    if (r.isReady || st === "READY") {
+      ready.push(r);
+      return;
+    }
     errors.push({ phone: r.phone || fb, error: `ꜱᴛᴀᴛᴇ=${st}` });
   });
 
@@ -1278,12 +1309,15 @@ function buildDetectionOutput(numbers, results, elapsedSec = null) {
     "",
     `<blockquote>◈ ${bar(100)} 100%`,
     `⟡ ᴘʀᴏɢʀᴇꜱ ⦂ ${numbers.length} / ${numbers.length} ɴᴏᴍᴏʀ`,
+    "",
     `✧ ꜱɪᴀᴘ ⦂ ${ready.length}`,
-    `◎ ʟɪᴍɪᴛ ꜱᴍꜱ ⦂ ${smsLimit.length}`,
     `◐ ᴄᴏᴏʟᴅᴏᴡɴ ⦂ ${cooldown.length}`,
-    `△ ᴛɪᴅᴀᴋ ꜱᴜᴘᴘᴏʀᴛ ᴄʟᴏɴᴇ ⦂ ${clone.length}`,
-    `✕ ᴅɪʙᴀᴛᴀꜱɪ ⦂ ${banned.length}`,
-    `● ᴏɴ-ᴅᴇᴠɪᴄᴇ ⦂ ${devOn} · ○ ᴏꜰꜰ-ᴅᴇᴠɪᴄᴇ ⦂ ${devOff}`
+    `↻ ꜱᴇᴅᴀɴɢ ᴅɪᴠᴇʀɪꜰɪᴋᴀꜱɪ ⦂ ${inUse.length}`,
+    `△ ᴄʟᴏɴᴇ ⦂ ${clone.length}`,
+    `✕ ʙᴀɴɴᴇᴅ ⦂ ${banned.length}`,
+    "",
+    `● ᴏɴ-ᴅᴇᴠɪᴄᴇ ⦂ ${devOn}`,
+    `○ ᴏꜰꜰ-ᴅᴇᴠɪᴄᴇ ⦂ ${devOff}`
   ];
   if (errors.length) summaryLines.push(`⚠ ɢᴀɢᴀʟ ⦂ ${errors.length}`);
   summaryLines[summaryLines.length - 1] += "</blockquote>";
@@ -1293,39 +1327,35 @@ function buildDetectionOutput(numbers, results, elapsedSec = null) {
   const blocks = [summaryLines.join("\n")];
 
   if (ready.length) {
-    const items = ready.map(r => `⟢ <code>${esc(r.phone)}</code> ⦂ ꜱɪᴀᴘ · ${deviceBadge(r)}`);
+    const items = ready.map(r => `⟢ <code>${esc(r.phone)}</code>\n   └ ꜱɪᴀᴘ · ${deviceBadge(r)}`);
     blocks.push(`✧ ꜱɪᴀᴘ ᴅɪᴠᴇʀɪꜰɪᴋᴀꜱɪ\n<blockquote>${items.join("\n")}</blockquote>`);
   }
-  if (smsLimit.length) {
-    const items = smsLimit.map(r => `⟢ <code>${esc(r.phone)}</code> ⦂ ᴊᴇᴅᴀ ${displayCD(r)} · ${deviceBadge(r)}`);
-    blocks.push(`◎ ᴊᴇᴅᴀ ᴍᴇᴛᴏᴅᴇ (ʙᴜᴋᴀɴ ᴄᴏᴏʟᴅᴏᴡɴ ᴘᴇɴᴜʜ)\n<blockquote>${items.join("\n")}</blockquote>`);
+  if (cooldown.length) {
+    const items = cooldown.map(r => `⟢ <code>${esc(r.phone)}</code>\n   └ ${displayCD(r)} · ${deviceBadge(r)}`);
+    blocks.push(`◐ ᴄᴏᴏʟᴅᴏᴡɴ\n<blockquote>${items.join("\n")}</blockquote>`);
   }
   if (inUse.length) {
-    const items = inUse.map(r => `⟢ <code>${esc(r.phone)}</code> ⦂ ꜱᴇᴅᴀɴɢ ᴅɪᴠᴇʀɪꜰɪᴋᴀꜱɪ · ${deviceBadge(r)}`);
-    blocks.push(`↻ ꜱᴇᴅᴀɴɢ ᴅɪᴠᴇʀɪꜰɪᴋᴀꜱɪ ᴏʀᴀɴɢ ʟᴀɪɴ\n<blockquote>${items.join("\n")}</blockquote>`);
-  }
-  if (cooldown.length) {
-    const items = cooldown.map(r => `⟢ <code>${esc(r.phone)}</code> ⦂ ${displayCD(r)} · ${deviceBadge(r)}`);
-    blocks.push(`◐ ᴄᴏᴏʟᴅᴏᴡɴ ᴋᴇʀᴀꜱ\n<blockquote>${items.join("\n")}</blockquote>`);
+    const items = inUse.map(r => `⟢ <code>${esc(r.phone)}</code>\n   └ ꜱᴇᴅᴀɴɢ ᴅɪᴠᴇʀɪꜰɪᴋᴀꜱɪ · ${deviceBadge(r)}`);
+    blocks.push(`↻ ꜱᴇᴅᴀɴɢ ᴅɪᴠᴇʀɪꜰɪᴋᴀꜱɪ\n<blockquote>${items.join("\n")}</blockquote>`);
   }
   if (clone.length) {
-    const items = clone.map(r => `⟢ <code>${esc(r.phone)}</code> ⦂ ${cloneStatusLabel(r)} · ${deviceBadge(r)}`);
+    const items = clone.map(r => `⟢ <code>${esc(r.phone)}</code>\n   └ ${cloneStatusLabel(r)} · ${deviceBadge(r)}`);
     blocks.push(`△ ᴛɪᴅᴀᴋ ꜱᴜᴘᴘᴏʀᴛ ᴄʟᴏɴᴇ\n<blockquote>${items.join("\n")}</blockquote>`);
   }
   if (banned.length) {
-    const items = banned.map(r => `⟢ <code>${esc(r.phone)}</code> ⦂ ${deviceBadge(r)}`);
+    const items = banned.map(r => `⟢ <code>${esc(r.phone)}</code>\n   └ ${deviceBadge(r)}`);
     blocks.push(`✕ ᴅɪʙᴀᴛᴀꜱɪ\n<blockquote>${items.join("\n")}</blockquote>`);
   }
   if (errors.length) {
-    const items = errors.map(e => `⟢ <code>${esc(e.phone)}</code> ⦂ ${esc(e.error)}`);
-    blocks.push(`⚠ ɢᴀɢᴀʟ ᴅɪᴘᴇʀɪᴋꜱᴀ\n<blockquote>${items.join("\n")}</blockquote>`);
+    const items = errors.map(e => `⟢ <code>${esc(e.phone)}</code>\n   └ ${esc(e.error)}`);
+    blocks.push(`⚠ ɢᴀɢᴀʟ\n<blockquote>${items.join("\n")}</blockquote>`);
   }
+
   if (elapsedSec !== null) {
-    blocks.push(`⚡ ᴡᴀᴋᴛᴜ ⦂ ${elapsedSec}ᴅ`);
+    blocks.push(`⚡ ${elapsedSec}ᴅ`);
   }
 
   return {
-    readyCount: ready.length,
     chunks: splitBlocksIntoChunks(blocks, 3800)
   };
 }
