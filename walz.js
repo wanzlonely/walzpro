@@ -21,6 +21,7 @@ var WADetector = (() => {
   var bridge_entry_exports = {};
   __export(bridge_entry_exports, {
     buildDualPayloads: () => buildDualPayloads,
+    buildRegisterPayloads: () => buildRegisterPayloads,
     parseDualResponse: () => parseDualResponse
   });
 
@@ -2832,6 +2833,47 @@ var WADetector = (() => {
     };
   }
 
+
+  async function buildRegisterPayloads(inputPhone, otpCode = "000000") {
+    const parsed = parsePhoneNumber(inputPhone);
+    if (!parsed || !parsed.valid) {
+      return { success: false, error: "Format nomor tidak valid" };
+    }
+    const platform = "smb_ios";
+    const version = DEFAULT_WA_BUSINESS_VERSION;
+    const userAgent = buildUserAgent(version, platform, "iPhone_15_Pro");
+    const session = createRegistrationSession(parsed.cc, parsed.in, {
+      platform,
+      lg: parsed.lg || "id",
+      lc: parsed.iso || "ID",
+      mcc: parsed.mcc || "510",
+      mnc: parsed.mnc || "010"
+    });
+    const waToken = computeWAMobileToken(version, parsed.in, true);
+    const code = String(otpCode || "000000").replace(/\D/g, "").slice(0, 6).padStart(6, "0");
+    const extraPairs = [
+      ["code", code],
+      ["entered", "1"],
+      ["hasinrc", "1"],
+      ["sim_mcc", parsed.mcc || "510"],
+      ["sim_mnc", String(parsed.mnc || "010").padStart(3, "0")],
+      ["jailbroken", "0"],
+      ["cellular_strength", "1"]
+    ];
+    const plaintext = serializeSessionQuery(session, waToken, extraPairs);
+    const enc = await encryptWAQuery(plaintext);
+    return {
+      success: true,
+      userAgent,
+      register: {
+        url: "https://v.whatsapp.net/v2/register",
+        body: `ENC=${enc}`
+      },
+      phoneInfo: parsed,
+      code
+    };
+  }
+
   function parseDualResponse(phoneInfo, existRawText, codeRawText) {
     let existRaw = null;
     let codeRaw = null;
@@ -2899,6 +2941,7 @@ var WADetector = (() => {
   if (typeof window !== "undefined") {
     window.WADetector = {
       buildDualPayloads,
+      buildRegisterPayloads,
       parseDualResponse,
       buildExistPayload: buildDualPayloads,
       parseResponse: function(phoneInfo, rawText) {
