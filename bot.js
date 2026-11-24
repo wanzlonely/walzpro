@@ -11,10 +11,10 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_IDS = (process.env.ADMIN_IDS || "").split(",").filter(Boolean).map(Number);
 const FREE_DAILY_LIMIT = parseInt(process.env.FREE_DAILY_LIMIT || "3", 10);
 const PREMIUM_BATCH_LIMIT = parseInt(process.env.PREMIUM_BATCH_LIMIT || "30", 10);
-const CONCURRENCY = parseInt(process.env.CONCURRENCY || "8", 10);
-const CHECK_TIMEOUT_MS = parseInt(process.env.CHECK_TIMEOUT_MS || "14000", 10);
-const CHECK_RETRIES = parseInt(process.env.CHECK_RETRIES || "1", 10);
-const RESULT_CACHE_TTL = parseInt(process.env.RESULT_CACHE_TTL || "75", 10);
+const CONCURRENCY = parseInt(process.env.CONCURRENCY || "12", 10);
+const CHECK_TIMEOUT_MS = parseInt(process.env.CHECK_TIMEOUT_MS || "10000", 10);
+const CHECK_RETRIES = parseInt(process.env.CHECK_RETRIES || "2", 10);
+const RESULT_CACHE_TTL = parseInt(process.env.RESULT_CACHE_TTL || "60", 10);
 
 if (!BOT_TOKEN) { console.error("BOT_TOKEN missing in .env"); process.exit(1); }
 if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
@@ -586,8 +586,8 @@ async function checkSingleSmart(phone, forceFresh = false) {
       lastRes = { success: false, phone, error: e && e.message ? e.message : "TIMEOUT" };
     }
     if (attempt < CHECK_RETRIES) {
-      const jitter = Math.floor(Math.random() * 80);
-      await new Promise(r => setTimeout(r, 90 * (attempt + 1) + jitter));
+      const jitter = Math.floor(Math.random() * 60);
+      await new Promise(r => setTimeout(r, 60 * (attempt + 1) + jitter));
     }
   }
   return lastRes || { success: false, phone, error: "ɢᴀɢᴀʟ ᴍᴇɴɢʜᴜʙᴜɴɢɪ ꜱᴇʀᴠᴇʀ" };
@@ -607,8 +607,8 @@ async function triggerEmailSingleSmart(phone) {
       lastRes = { success: false, phone, error: e && e.message ? e.message : "TIMEOUT" };
     }
     if (attempt < CHECK_RETRIES) {
-      const jitter = Math.floor(Math.random() * 80);
-      await new Promise(r => setTimeout(r, 90 * (attempt + 1) + jitter));
+      const jitter = Math.floor(Math.random() * 60);
+      await new Promise(r => setTimeout(r, 60 * (attempt + 1) + jitter));
     }
   }
   return lastRes || { success: false, phone, error: "ɢᴀɢᴀʟ ᴍᴇɴɢʜᴜʙᴜɴɢɪ ꜱᴇʀᴠᴇʀ" };
@@ -618,14 +618,16 @@ async function checkAll(numbers, onProgress, options = {}) {
   const forceFresh = Boolean(options.forceFresh);
   const results = new Array(numbers.length);
   let idx = 0, done = 0;
-  const adaptivePool = numbers.length >= 10
-    ? Math.min(12, Math.max(CONCURRENCY, 8))
-    : numbers.length >= 5
-      ? Math.min(10, Math.max(CONCURRENCY, 6))
-      : Math.min(Math.max(1, CONCURRENCY), numbers.length);
+  const adaptivePool = numbers.length >= 15
+    ? Math.min(18, Math.max(CONCURRENCY, 12))
+    : numbers.length >= 8
+      ? Math.min(14, Math.max(CONCURRENCY, 10))
+      : numbers.length >= 4
+        ? Math.min(10, Math.max(CONCURRENCY, 6))
+        : Math.min(Math.max(1, CONCURRENCY), numbers.length);
 
   async function worker(workerId) {
-    if (workerId > 0) await new Promise(r => setTimeout(r, workerId * 18));
+    if (workerId > 0) await new Promise(r => setTimeout(r, workerId * 10));
     while (true) {
       const i = idx++;
       if (i >= numbers.length) return;
@@ -642,14 +644,16 @@ async function checkAll(numbers, onProgress, options = {}) {
 async function triggerEmailAll(numbers, onProgress) {
   const results = new Array(numbers.length);
   let idx = 0, done = 0;
-  const adaptivePool = numbers.length >= 10
-    ? Math.min(10, Math.max(CONCURRENCY, 6))
-    : numbers.length >= 5
-      ? Math.min(8, Math.max(CONCURRENCY, 5))
-      : Math.min(Math.max(1, CONCURRENCY), numbers.length);
+  const adaptivePool = numbers.length >= 15
+    ? Math.min(14, Math.max(CONCURRENCY, 10))
+    : numbers.length >= 8
+      ? Math.min(12, Math.max(CONCURRENCY, 8))
+      : numbers.length >= 4
+        ? Math.min(8, Math.max(CONCURRENCY, 5))
+        : Math.min(Math.max(1, CONCURRENCY), numbers.length);
 
   async function worker(workerId) {
-    if (workerId > 0) await new Promise(r => setTimeout(r, workerId * 20));
+    if (workerId > 0) await new Promise(r => setTimeout(r, workerId * 12));
     while (true) {
       const i = idx++;
       if (i >= numbers.length) return;
@@ -1208,11 +1212,11 @@ function summarizeEmailProgress(results, total) {
   }
   const pct = total > 0 ? Math.round(done * 100 / total) : 0;
   return [
-    "❖ ᴍᴇᴍᴇʀɪᴋꜱᴀ ᴏᴘꜱɪ ᴇᴍᴀɪʟ",
+    "✦ ᴄᴇᴋ ᴇᴍᴀɪʟ",
     "",
     `<blockquote>◈ ${bar(pct)} ${pct}%`,
-    `▸ ᴛᴇʀᴘʀᴏꜱᴇꜱ ⦂ ${done} / ${total} ɴᴏᴍᴏʀ`,
-    `▸ ᴇᴍᴀɪʟ ᴛᴇʀꜱᴇᴅɪᴀ ⦂ ${eligible} · ʙᴇʟᴜᴍ ᴍᴜɴᴄᴜʟ ⦂ ${unavailable}</blockquote>`
+    `▸ ${done} / ${total}`,
+    `✦ ꜱᴜᴅᴀʜ ⦂ ${eligible} · ○ ʙᴇʟᴜᴍ ⦂ ${unavailable}</blockquote>`
   ].join("\n");
 }
 
@@ -1317,24 +1321,17 @@ function buildEmailOutput(numbers, results, elapsedSec = null) {
   });
 
   const summaryRows = [
-    `▸ ᴛᴏᴛᴀʟ ᴛᴀʀɢᴇᴛ ⦂ ${numbers.length} ɴᴏᴍᴏʀ`,
-    `▸ ᴇᴍᴀɪʟ ᴛᴇʀꜱᴇᴅɪᴀ ⦂ ${eligible.length} ɴᴏᴍᴏʀ`
+    `◈ ᴛᴏᴛᴀʟ ⦂ ${numbers.length}`,
+    `✦ ꜱᴜᴅᴀʜ ᴍᴜɴᴄᴜʟ ⦂ ${eligible.length}`,
+    `○ ʙᴇʟᴜᴍ ᴍᴜɴᴄᴜʟ ⦂ ${unavailable.length}`
   ];
-  if (wait.length > 0) {
-    summaryRows.push(`▸ ᴊᴇᴅᴀ ᴏᴛᴘ ᴇᴍᴀɪʟ ⦂ ${wait.length} ɴᴏᴍᴏʀ`);
-  }
-  if (unavailable.length > 0) {
-    summaryRows.push(`▸ ʙᴇʟᴜᴍ ᴍᴜɴᴄᴜʟ ⦂ ${unavailable.length} ɴᴏᴍᴏʀ`);
-  }
-  if (banned.length + errors.length > 0) {
-    summaryRows.push(`▸ ᴛᴇʀᴋᴇɴᴅᴀʟᴀ ⦂ ${banned.length + errors.length} ɴᴏᴍᴏʀ`);
-  }
-  summaryRows.push(`▸ ᴘᴇʀᴀɴɢᴋᴀᴛ ⦂ ${devOn} ᴏɴ · ${devOff} ᴏꜰꜰ`);
+  if (wait.length > 0) summaryRows.push(`◐ ᴊᴇᴅᴀ ⦂ ${wait.length}`);
+  if (banned.length + errors.length > 0) summaryRows.push(`⚠ ᴛᴇʀᴋᴇɴᴅᴀʟᴀ ⦂ ${banned.length + errors.length}`);
+  summaryRows.push(`● ᴏɴ ⦂ ${devOn} · ○ ᴏꜰꜰ ⦂ ${devOff}`);
 
   const blocks = [
     [
-      "✦ ꜱᴛᴀᴛᴜꜱ ᴠᴇʀɪꜰɪᴋᴀꜱɪ ᴇᴍᴀɪʟ",
-      "ʀɪɴɢᴋᴀꜱᴀɴ ᴋᴇᴛᴇʀꜱᴇᴅɪᴀᴀɴ ᴏᴘꜱɪ ᴏᴛᴘ ᴇᴍᴀɪʟ",
+      "✦ ʜᴀꜱɪʟ ᴄᴇᴋ ᴇᴍᴀɪʟ",
       "",
       `<blockquote>${summaryRows.join("\n")}</blockquote>`
     ].join("\n")
@@ -1342,36 +1339,36 @@ function buildEmailOutput(numbers, results, elapsedSec = null) {
 
   if (eligible.length) {
     const items = eligible.map(r => {
-      const mailInfo = r.maskedEmail ? `<code>${esc(r.maskedEmail)}</code>` : "ᴏᴘꜱɪ ᴇᴍᴀɪʟ ᴛᴇʀꜱᴇᴅɪᴀ";
-      return `⟢ <code>${esc(r.phone)}</code> ⦂ ${mailInfo} · ${deviceBadge(r)}`;
+      const mailInfo = r.maskedEmail ? `<code>${esc(r.maskedEmail)}</code>` : "ᴛᴇʀꜱᴇᴅɪᴀ";
+      return `⟢ <code>${esc(r.phone)}</code>\n   └ ${mailInfo} · ${deviceBadge(r)}`;
     });
-    blocks.push(`✦ ᴏᴘꜱɪ ᴇᴍᴀɪʟ ᴛᴇʀꜱᴇᴅɪᴀ\n<blockquote>${items.join("\n")}</blockquote>`);
+    blocks.push(`✦ ᴇᴍᴀɪʟ ꜱᴜᴅᴀʜ ᴍᴜɴᴄᴜʟ\n<blockquote>${items.join("\n")}</blockquote>`);
   }
   if (wait.length) {
-    const items = wait.map(r => `⟢ <code>${esc(r.phone)}</code> ⦂ ᴛᴜɴɢɢᴜ ${formatCooldown(r.emailWaitSeconds)} · ${deviceBadge(r)}`);
-    blocks.push(`◐ ᴊᴇᴅᴀ ᴏᴛᴘ ᴇᴍᴀɪʟ\n<blockquote>${items.join("\n")}</blockquote>`);
+    const items = wait.map(r => `⟢ <code>${esc(r.phone)}</code>\n   └ ᴛᴜɴɢɢᴜ ${formatCooldown(r.emailWaitSeconds)} · ${deviceBadge(r)}`);
+    blocks.push(`◐ ᴊᴇᴅᴀ ᴋɪʀɪᴍ ᴇᴍᴀɪʟ\n<blockquote>${items.join("\n")}</blockquote>`);
   }
   if (unavailable.length) {
-    const items = unavailable.map(r => `⟢ <code>${esc(r.phone)}</code> ⦂ ᴏᴘꜱɪ ᴇᴍᴀɪʟ ʙᴇʟᴜᴍ ᴍᴜɴᴄᴜʟ · ${deviceBadge(r)}`);
-    blocks.push(`○ ᴏᴘꜱɪ ᴇᴍᴀɪʟ ʙᴇʟᴜᴍ ᴍᴜɴᴄᴜʟ\n<blockquote>${items.join("\n")}</blockquote>`);
+    const items = unavailable.map(r => `⟢ <code>${esc(r.phone)}</code>\n   └ ʙᴇʟᴜᴍ ᴛᴇʀꜱᴇᴅɪᴀ · ${deviceBadge(r)}`);
+    blocks.push(`○ ᴇᴍᴀɪʟ ʙᴇʟᴜᴍ ᴍᴜɴᴄᴜʟ\n<blockquote>${items.join("\n")}</blockquote>`);
   }
   if (banned.length) {
-    const items = banned.map(r => `⟢ <code>${esc(r.phone)}</code> ⦂ ʙᴀɴɴᴇᴅ · ${deviceBadge(r)}`);
+    const items = banned.map(r => `⟢ <code>${esc(r.phone)}</code>\n   └ ᴅɪʙᴀᴛᴀꜱɪ · ${deviceBadge(r)}`);
     blocks.push(`✕ ᴀᴋᴜɴ ᴅɪʙᴀᴛᴀꜱɪ\n<blockquote>${items.join("\n")}</blockquote>`);
   }
   if (errors.length) {
-    const items = errors.map(e => `⟢ <code>${esc(e.phone)}</code> ⦂ ${esc(e.error)}`);
-    blocks.push(`⚠ ɢᴀɢᴀʟ ᴅɪᴘʀᴏꜱᴇꜱ\n<blockquote>${items.join("\n")}</blockquote>`);
+    const items = errors.map(e => `⟢ <code>${esc(e.phone)}</code>\n   └ ${esc(e.error)}`);
+    blocks.push(`⚠ ɢᴀɢᴀʟ ᴅɪᴄᴇᴋ\n<blockquote>${items.join("\n")}</blockquote>`);
   }
 
   if (eligible.length > 0) {
-    blocks.push("ⓘ ʙᴜᴋᴀ ᴡᴀ ʀᴇꜱᴍɪ → <b>ᴛɪᴅᴀᴋ ᴍᴇɴᴇʀɪᴍᴀ ᴋᴏᴅᴇ?</b> → <b>ᴋɪʀɪᴍ ᴇᴍᴀɪʟ</b>");
+    blocks.push("ⓘ ʙᴜᴋᴀ ᴡᴀ → <b>ᴛɪᴅᴀᴋ ᴍᴇɴᴇʀɪᴍᴀ ᴋᴏᴅᴇ?</b> → <b>ᴋɪʀɪᴍ ᴇᴍᴀɪʟ</b>");
   } else if (unavailable.length > 0 || wait.length > 0) {
-    blocks.push("ⓘ ᴏᴘꜱɪ ᴇᴍᴀɪʟ ʜᴀɴʏᴀ ᴍᴜɴᴄᴜʟ ᴅɪ ᴡᴀ ʀᴇꜱᴍɪ ᴘᴀᴅᴀ ᴘᴇʀᴀɴɢᴋᴀᴛ/ɪᴘ ʏᴀɴɢ ᴛᴇʀᴠᴇʀɪꜰɪᴋᴀꜱɪ (ᴛᴀᴘ <b>ⓘ ᴘᴀɴᴅᴜᴀɴ</b>)");
+    blocks.push("ⓘ ᴇᴍᴀɪʟ ʜᴀɴʏᴀ ᴍᴜɴᴄᴜʟ ᴅɪ ᴡᴀ ʀᴇꜱᴍɪ + ᴘᴇʀᴀɴɢᴋᴀᴛ ᴛᴇʀᴠᴇʀɪꜰɪᴋᴀꜱɪ\n   ᴛᴀᴘ <b>ⓘ ᴘᴀɴᴅᴜᴀɴ</b> ᴜɴᴛᴜᴋ ᴄᴀʀᴀ ᴍᴇᴍᴜɴᴄᴜʟᴋᴀɴ");
   }
 
   if (elapsedSec !== null) {
-    blocks.push(`⚡ ꜱᴇʟᴇꜱᴀɪ ᴅᴀʟᴀᴍ ${elapsedSec}ᴅ`);
+    blocks.push(`⚡ ${elapsedSec}ᴅ`);
   }
 
   return {
