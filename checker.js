@@ -128,10 +128,10 @@ function inferFromRawJson(phone, existJson, codeJson, parsed) {
     };
   }
 
-  if (
-    cooldownSeconds > 0 ||
-    ["too_recent", "too_many", "too_many_guesses", "try_again", "next_method", "temporarily_unavailable", "rate_overlimit"].includes(reason)
-  ) {
+  const hardCooldownReasons = ["too_recent", "too_many", "too_many_guesses", "try_again", "next_method", "temporarily_unavailable", "rate_overlimit"];
+  const readyReasons = ["incorrect", "sent", "sms_sent", "code_sent", "ok", ""];
+
+  if (hardCooldownReasons.includes(reason) || (cooldownSeconds >= 600 && status !== "ok")) {
     return {
       success: true,
       phone,
@@ -147,7 +147,7 @@ function inferFromRawJson(phone, existJson, codeJson, parsed) {
     };
   }
 
-  if (status === "ok" || reason === "incorrect" || reason === "sent" || reason === "sms_sent" || reason === "code_sent") {
+  if (status === "ok" || readyReasons.includes(reason) || (cooldownSeconds > 0 && cooldownSeconds < 600 && !hardCooldownReasons.includes(reason))) {
     return {
       success: true,
       phone,
@@ -187,17 +187,34 @@ function normalizeResult(phone, parsed, existText, codeText) {
     };
   }
 
+  const codeReason = String((codeJson && codeJson.reason) || (existJson && existJson.reason) || parsed.reason || "").toLowerCase();
+  const codeStatus = String((codeJson && codeJson.status) || (existJson && existJson.status) || "").toLowerCase();
   const rawCooldown = Number(
     parsed.cooldownSeconds ??
     (codeJson && (codeJson.retry_after ?? codeJson.sms_wait ?? codeJson.voice_wait ?? codeJson.wait)) ??
     0
   );
-  const cooldownSeconds = Number.isFinite(rawCooldown) && rawCooldown > 0 ? Math.floor(rawCooldown) : 0;
+  let cooldownSeconds = Number.isFinite(rawCooldown) && rawCooldown > 0 ? Math.floor(rawCooldown) : 0;
+
+  const hardCooldownReasons = ["too_recent", "too_many", "too_many_guesses", "try_again", "next_method", "temporarily_unavailable", "rate_overlimit"];
+  const isHardCooldown = hardCooldownReasons.includes(codeReason) || (Boolean(parsed.isCooldown) && cooldownSeconds >= 600);
 
   let isBanned = Boolean(parsed.isBanned);
   let isCloneBlocked = Boolean(parsed.isCloneBlocked);
-  let isCooldown = Boolean(parsed.isCooldown) || cooldownSeconds > 0;
-  let isReady = Boolean(parsed.isReady);
+  let isReady = Boolean(parsed.isReady) || codeStatus === "ok" || ["incorrect", "sent", "sms_sent", "code_sent"].includes(codeReason);
+  let isCooldown = false;
+
+  if (isHardCooldown && !isBanned && !isCloneBlocked) {
+    isCooldown = true;
+    isReady = false;
+  } else if (isReady) {
+    isCooldown = false;
+    cooldownSeconds = 0;
+  } else if (cooldownSeconds >= 600) {
+    isCooldown = true;
+    isReady = false;
+  }
+
   let state = String(parsed.state || "UNKNOWN").toUpperCase();
 
   if (isBanned) {
@@ -228,7 +245,7 @@ function normalizeResult(phone, parsed, existText, codeText) {
     isCooldown,
     isCloneBlocked,
     isBanned,
-    cooldownSeconds,
+    cooldownSeconds: isCooldown ? cooldownSeconds : 0,
     wa_old: deviceOn,
     isDeviceOn: deviceOn,
     hasDevice: deviceOn
@@ -452,4 +469,97 @@ async function triggerEmailVerification(rawPhone) {
   }
 }
 
-module.exports = { checkPhone, triggerEmailVerification };
+async function sendVerificationCode(rawPhone, method = "sms") {
+  const cleanPhone = sanitizePhoneInput(rawPhone);
+  const allowed = new Set(["sms", "voice", "flash", "email"]);
+  const methodKey = allowed.has(String(method || "").toLowerCase()) ? String(method).toLowerCase() : "sms";
+
+  try {
+    const payload = await WADetector.buildDualPayloads(cleanPhone);
+    if (!payload || !payload.success) {
+      return {
+        success: false,
+        phone: cleanPhone,
+        error: (payload && payload.error) || "invalid_phone"
+      };
+    }
+
+    const formattedPhone = `+${payload.phoneInfo.full}`;
+    let existText = "";
+    let codeText = "";
+
+    if (payload.exist) {
+      try { existText = await callWA(payload.exist, payload.userAgent, payload.headers); } catch (_) {}
+    }
+
+    const req = payload.code || payload.email || null;
+    if (!req) {
+      return { success: false, phone: formattedPhone, error: "no_code_endpoint" };
+    }
+
+    if (req.body && typeof req.body === "string" && methodKey !== "sms") {
+      if (/([?&])method=/.test(req.body)) {
+        req.body = req.body.replace(/([?&])method=[^&]*/i, `$1method=${methodKey}`);
+      } else {
+        req.body += (req.body.includes("=") ? "&" : "") + `method=${methodKey}`;
+      }
+    }
+
+    try {
+      if (existText) await new Promise(r => setTimeout(r, 5));
+      codeText = await callWA(req, payload.userAgent, payload.headers);
+    } catch (e) {
+      return {
+        success: false,
+        phone: formattedPhone,
+        method: methodKey,
+        error: String(e && e.message ? e.message : e)
+      };
+    }
+
+    const codeJson = safeJsonParse(codeText) || {};
+    const existJson = safeJsonParse(existText) || {};
+    const reason = String(codeJson.reason || existJson.reason || "").toLowerCase();
+    const status = String(codeJson.status || "").toLowerCase();
+    const wait = Number(codeJson.retry_after ?? codeJson.sms_wait ?? codeJson.voice_wait ?? codeJson.wait ?? 0);
+    const cooldownSeconds = Number.isFinite(wait) && wait > 0 ? Math.floor(wait) : 0;
+    const deviceOn = extractDeviceState(null, existJson, codeJson);
+
+    const hardFail = ["blocked", "banned", "no_routes", "bad_token", "length_long", "length_short", "missing"].includes(reason);
+    const sentOk = status === "ok" || ["sent", "sms_sent", "code_sent", "incorrect"].includes(reason);
+
+    if (hardFail) {
+      return {
+        success: false,
+        phone: formattedPhone,
+        method: methodKey,
+        state: reason === "blocked" || reason === "banned" ? "BANNED" : "FAILED",
+        error: reason || "send_failed",
+        cooldownSeconds,
+        isDeviceOn: deviceOn
+      };
+    }
+
+    return {
+      success: true,
+      phone: formattedPhone,
+      method: methodKey,
+      state: sentOk ? "SENT" : (cooldownSeconds > 0 ? "COOLDOWN" : "SENT"),
+      reason: reason || status || "ok",
+      cooldownSeconds,
+      maskedEmail: codeJson.email || codeJson.masked_email || existJson.email || null,
+      isDeviceOn: deviceOn,
+      hasDevice: deviceOn,
+      raw: codeJson
+    };
+  } catch (e) {
+    return {
+      success: false,
+      phone: cleanPhone,
+      method: methodKey,
+      error: String(e && e.message ? e.message : e)
+    };
+  }
+}
+
+module.exports = { checkPhone, triggerEmailVerification, sendVerificationCode };
