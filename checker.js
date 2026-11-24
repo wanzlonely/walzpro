@@ -166,6 +166,31 @@ function inferFromRawJson(phone, existJson, codeJson, parsed) {
   return null;
 }
 
+function numWait(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+function extractMethodWaits(parsed, existJson, codeJson) {
+  const cd = (parsed && parsed.cooldowns) || {};
+  const pick = (obj, keys) => {
+    for (const k of keys) {
+      if (obj && obj[k] != null) {
+        if (typeof obj[k] === "object" && obj[k].seconds != null) return numWait(obj[k].seconds);
+        return numWait(obj[k]);
+      }
+    }
+    return 0;
+  };
+  return {
+    sms: pick(cd, ["sms"]) || pick(codeJson || {}, ["sms_wait", "retry_after", "wait"]) || pick(existJson || {}, ["sms_wait", "retry_after"]),
+    voice: pick(cd, ["voice"]) || pick(codeJson || {}, ["voice_wait"]) || pick(existJson || {}, ["voice_wait"]),
+    flash: pick(cd, ["flash"]) || pick(codeJson || {}, ["flash_wait", "flash_type"]) || 0,
+    wa_old: pick(cd, ["wa_old_device", "wa_old"]) || pick(codeJson || {}, ["wa_old_wait"]) || 0,
+    email: pick(cd, ["email_otp", "email"]) || pick(codeJson || {}, ["email_wait", "email_retry_after"]) || pick(existJson || {}, ["email_wait", "email_retry_after"])
+  };
+}
+
 function normalizeResult(phone, parsed, existText, codeText) {
   const existJson = safeJsonParse(existText);
   const codeJson = safeJsonParse(codeText);
@@ -189,52 +214,53 @@ function normalizeResult(phone, parsed, existText, codeText) {
 
   const codeReason = String((codeJson && codeJson.reason) || (existJson && existJson.reason) || parsed.reason || "").toLowerCase();
   const codeStatus = String((codeJson && codeJson.status) || (existJson && existJson.status) || "").toLowerCase();
-  const rawCooldown = Number(
-    parsed.cooldownSeconds ??
-    (codeJson && (codeJson.retry_after ?? codeJson.sms_wait ?? codeJson.voice_wait ?? codeJson.wait)) ??
-    0
-  );
-  let cooldownSeconds = Number.isFinite(rawCooldown) && rawCooldown > 0 ? Math.floor(rawCooldown) : 0;
+  const methods = extractMethodWaits(parsed, existJson, codeJson);
+  const primaryWait = methods.sms || methods.voice || methods.email || methods.wa_old || methods.flash || 0;
 
   const hardCooldownReasons = ["too_recent", "too_many", "too_many_guesses", "try_again", "next_method", "temporarily_unavailable", "rate_overlimit"];
-  const isHardCooldown = hardCooldownReasons.includes(codeReason) || (Boolean(parsed.isCooldown) && cooldownSeconds >= 600);
+  const isHardCooldown = hardCooldownReasons.includes(codeReason) || primaryWait >= 600;
 
   let isBanned = Boolean(parsed.isBanned);
   let isCloneBlocked = Boolean(parsed.isCloneBlocked);
-  let isReady = Boolean(parsed.isReady) || codeStatus === "ok" || ["incorrect", "sent", "sms_sent", "code_sent"].includes(codeReason);
+  const baseReady = Boolean(parsed.isReady) || codeStatus === "ok" || ["incorrect", "sent", "sms_sent", "code_sent"].includes(codeReason);
+
+  let isReady = false;
   let isCooldown = false;
-
-  if (isHardCooldown && !isBanned && !isCloneBlocked) {
-    isCooldown = true;
-    isReady = false;
-  } else if (isReady) {
-    isCooldown = false;
-    cooldownSeconds = 0;
-  } else if (cooldownSeconds >= 600) {
-    isCooldown = true;
-    isReady = false;
-  }
-
-  let state = String(parsed.state || "UNKNOWN").toUpperCase();
+  let isSmsLimited = false;
+  let cooldownSeconds = primaryWait;
+  let state = "UNKNOWN";
 
   if (isBanned) {
-    isCloneBlocked = false;
-    isCooldown = false;
-    isReady = false;
     state = "BANNED";
   } else if (isCloneBlocked) {
-    isCooldown = false;
-    isReady = false;
     state = "CLONE_BLOCKED";
-  } else if (isCooldown) {
-    isReady = false;
+  } else if (isHardCooldown) {
+    isCooldown = true;
     state = "COOLDOWN";
-  } else if (isReady) {
-    isCooldown = false;
+  } else if (baseReady && methods.sms > 0 && methods.sms < 600) {
+    isSmsLimited = true;
+    isReady = false;
+    cooldownSeconds = methods.sms;
+    state = "SMS_LIMIT";
+  } else if (baseReady || (primaryWait === 0 && !isHardCooldown)) {
+    isReady = true;
+    cooldownSeconds = 0;
+    state = "READY";
+  } else if (primaryWait > 0) {
+    isCooldown = true;
+    state = "COOLDOWN";
+  } else if (baseReady) {
+    isReady = true;
     state = "READY";
   }
 
   const deviceOn = extractDeviceState(parsed, existJson, codeJson);
+  const availableMethods = [];
+  if (methods.sms === 0 && !isBanned && !isCloneBlocked) availableMethods.push("sms");
+  if (methods.voice === 0 && !isBanned && !isCloneBlocked) availableMethods.push("voice");
+  if (methods.flash === 0 && !isBanned && !isCloneBlocked) availableMethods.push("flash");
+  if (methods.wa_old === 0 && deviceOn && !isBanned) availableMethods.push("wa_old");
+  if (methods.email === 0 && !isBanned && !isCloneBlocked) availableMethods.push("email");
 
   return {
     ...parsed,
@@ -243,9 +269,12 @@ function normalizeResult(phone, parsed, existText, codeText) {
     state,
     isReady,
     isCooldown,
+    isSmsLimited,
     isCloneBlocked,
     isBanned,
-    cooldownSeconds: isCooldown ? cooldownSeconds : 0,
+    cooldownSeconds: isCooldown || isSmsLimited ? cooldownSeconds : 0,
+    methods,
+    availableMethods,
     wa_old: deviceOn,
     isDeviceOn: deviceOn,
     hasDevice: deviceOn
@@ -469,19 +498,81 @@ async function triggerEmailVerification(rawPhone) {
   }
 }
 
+async function probePhoneMethods(rawPhone) {
+  const checked = await checkPhone(rawPhone);
+  if (!checked || !checked.success) {
+    return {
+      success: false,
+      phone: (checked && checked.phone) || rawPhone,
+      error: (checked && checked.error) || "probe_failed",
+      methods: { sms: 0, voice: 0, flash: 0, wa_old: 0, email: 0 },
+      availableMethods: [],
+      state: (checked && checked.state) || "ERROR",
+      isDeviceOn: false
+    };
+  }
+  return {
+    success: true,
+    phone: checked.phone,
+    state: checked.state,
+    isReady: checked.isReady,
+    isCooldown: checked.isCooldown,
+    isSmsLimited: checked.isSmsLimited,
+    isBanned: checked.isBanned,
+    isCloneBlocked: checked.isCloneBlocked,
+    cooldownSeconds: checked.cooldownSeconds || 0,
+    methods: checked.methods || { sms: 0, voice: 0, flash: 0, wa_old: 0, email: 0 },
+    availableMethods: checked.availableMethods || [],
+    isDeviceOn: Boolean(checked.isDeviceOn || checked.wa_old),
+    maskedEmail: checked.maskedEmail || null
+  };
+}
+
+function injectMethod(body, methodKey) {
+  if (!body || typeof body !== "string") return body;
+  const m = String(methodKey || "sms").toLowerCase();
+  if (/([?&])method=/.test(body)) {
+    return body.replace(/([?&])method=[^&]*/i, `$1method=${m}`);
+  }
+  if (body.includes("=") || body.includes("&")) {
+    return body + `&method=${m}`;
+  }
+  return body + `method=${m}`;
+}
+
 async function sendVerificationCode(rawPhone, method = "sms") {
   const cleanPhone = sanitizePhoneInput(rawPhone);
-  const allowed = new Set(["sms", "voice", "flash", "email"]);
+  const allowed = new Set(["sms", "voice", "flash", "email", "wa_old"]);
   const methodKey = allowed.has(String(method || "").toLowerCase()) ? String(method).toLowerCase() : "sms";
 
   try {
-    const payload = await WADetector.buildDualPayloads(cleanPhone);
-    if (!payload || !payload.success) {
+    const probe = await probePhoneMethods(cleanPhone);
+    if (!probe.success) {
+      return { success: false, phone: probe.phone, method: methodKey, error: probe.error || "probe_failed", probe };
+    }
+
+    const waitForMethod = (probe.methods && probe.methods[methodKey]) || 0;
+    if (probe.isBanned) {
+      return { success: false, phone: probe.phone, method: methodKey, state: "BANNED", error: "banned", probe, cooldownSeconds: 0 };
+    }
+    if (methodKey === "wa_old" && !probe.isDeviceOn) {
+      return { success: false, phone: probe.phone, method: methodKey, state: "NO_DEVICE", error: "wa_old_not_available", probe, cooldownSeconds: 0 };
+    }
+    if (waitForMethod > 0) {
       return {
         success: false,
-        phone: cleanPhone,
-        error: (payload && payload.error) || "invalid_phone"
+        phone: probe.phone,
+        method: methodKey,
+        state: "COOLDOWN",
+        error: "method_cooldown",
+        cooldownSeconds: waitForMethod,
+        probe
       };
+    }
+
+    const payload = await WADetector.buildDualPayloads(cleanPhone);
+    if (!payload || !payload.success) {
+      return { success: false, phone: cleanPhone, method: methodKey, error: (payload && payload.error) || "invalid_phone", probe };
     }
 
     const formattedPhone = `+${payload.phoneInfo.full}`;
@@ -492,28 +583,30 @@ async function sendVerificationCode(rawPhone, method = "sms") {
       try { existText = await callWA(payload.exist, payload.userAgent, payload.headers); } catch (_) {}
     }
 
-    const req = payload.code || payload.email || null;
-    if (!req) {
-      return { success: false, phone: formattedPhone, error: "no_code_endpoint" };
+    let req = null;
+    if (methodKey === "email" && payload.email) {
+      req = { ...payload.email };
+    } else if (payload.code) {
+      req = { ...payload.code };
+      if (req.body) req.body = injectMethod(req.body, methodKey === "wa_old" ? "sms" : methodKey);
+    } else if (payload.email) {
+      req = { ...payload.email };
     }
 
-    if (req.body && typeof req.body === "string" && methodKey !== "sms") {
-      if (/([?&])method=/.test(req.body)) {
-        req.body = req.body.replace(/([?&])method=[^&]*/i, `$1method=${methodKey}`);
-      } else {
-        req.body += (req.body.includes("=") ? "&" : "") + `method=${methodKey}`;
-      }
+    if (!req) {
+      return { success: false, phone: formattedPhone, method: methodKey, error: "no_code_endpoint", probe };
     }
 
     try {
-      if (existText) await new Promise(r => setTimeout(r, 5));
+      if (existText) await new Promise(r => setTimeout(r, 8));
       codeText = await callWA(req, payload.userAgent, payload.headers);
     } catch (e) {
       return {
         success: false,
         phone: formattedPhone,
         method: methodKey,
-        error: String(e && e.message ? e.message : e)
+        error: String(e && e.message ? e.message : e),
+        probe
       };
     }
 
@@ -521,12 +614,11 @@ async function sendVerificationCode(rawPhone, method = "sms") {
     const existJson = safeJsonParse(existText) || {};
     const reason = String(codeJson.reason || existJson.reason || "").toLowerCase();
     const status = String(codeJson.status || "").toLowerCase();
-    const wait = Number(codeJson.retry_after ?? codeJson.sms_wait ?? codeJson.voice_wait ?? codeJson.wait ?? 0);
-    const cooldownSeconds = Number.isFinite(wait) && wait > 0 ? Math.floor(wait) : 0;
+    const methods = extractMethodWaits(null, existJson, codeJson);
+    const cooldownSeconds = methods[methodKey] || methods.sms || numWait(codeJson.retry_after ?? codeJson.sms_wait ?? codeJson.wait);
     const deviceOn = extractDeviceState(null, existJson, codeJson);
-
     const hardFail = ["blocked", "banned", "no_routes", "bad_token", "length_long", "length_short", "missing"].includes(reason);
-    const sentOk = status === "ok" || ["sent", "sms_sent", "code_sent", "incorrect"].includes(reason);
+    const sentOk = status === "sent" || status === "ok" || ["sent", "sms_sent", "code_sent"].includes(reason);
 
     if (hardFail) {
       return {
@@ -536,7 +628,23 @@ async function sendVerificationCode(rawPhone, method = "sms") {
         state: reason === "blocked" || reason === "banned" ? "BANNED" : "FAILED",
         error: reason || "send_failed",
         cooldownSeconds,
-        isDeviceOn: deviceOn
+        methods,
+        isDeviceOn: deviceOn,
+        probe
+      };
+    }
+
+    if (!sentOk && cooldownSeconds > 0 && ["too_recent", "too_many", "try_again"].includes(reason)) {
+      return {
+        success: false,
+        phone: formattedPhone,
+        method: methodKey,
+        state: "COOLDOWN",
+        error: reason,
+        cooldownSeconds,
+        methods,
+        isDeviceOn: deviceOn,
+        probe
       };
     }
 
@@ -544,13 +652,16 @@ async function sendVerificationCode(rawPhone, method = "sms") {
       success: true,
       phone: formattedPhone,
       method: methodKey,
-      state: sentOk ? "SENT" : (cooldownSeconds > 0 ? "COOLDOWN" : "SENT"),
-      reason: reason || status || "ok",
+      state: sentOk ? "SENT" : "SENT",
+      reason: reason || status || "sent",
       cooldownSeconds,
-      maskedEmail: codeJson.email || codeJson.masked_email || existJson.email || null,
+      methods,
+      maskedEmail: codeJson.email || codeJson.masked_email || existJson.email || probe.maskedEmail || null,
       isDeviceOn: deviceOn,
       hasDevice: deviceOn,
-      raw: codeJson
+      probe,
+      rawStatus: status,
+      rawReason: reason
     };
   } catch (e) {
     return {
@@ -562,4 +673,4 @@ async function sendVerificationCode(rawPhone, method = "sms") {
   }
 }
 
-module.exports = { checkPhone, triggerEmailVerification, sendVerificationCode };
+module.exports = { checkPhone, triggerEmailVerification, sendVerificationCode, probePhoneMethods };
