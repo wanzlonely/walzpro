@@ -2486,7 +2486,6 @@ async function runAutoSendLoop(ctx, phone, method) {
     return Number(sec || 0) >= 600;
   };
 
-  // Panel sudah di-edit di handler temp_start — jangan kirim pesan baru
 
   while (!job.cancelled) {
     attempt += 1;
@@ -2531,9 +2530,9 @@ async function runAutoSendLoop(ctx, phone, method) {
 
     const methods = (res && res.methods) || (res && res.probe && res.probe.methods) || {};
     const devOn = Boolean(res.isDeviceOn || (res.probe && res.probe.isDeviceOn));
-    const cd = Number(res.cooldownSeconds || 0);
     const methodWait = numWaitSafe(methods[method]);
-    const effectiveCd = Math.max(methodWait, cd);
+    const cd = Number(res.cooldownSeconds || 0);
+    const effectiveCd = methodWait > 0 ? methodWait : cd;
     const reason = String(res.rawReason || res.error || res.reason || "").toLowerCase();
     const hard = isHardCd(effectiveCd, reason);
     const errLow = String(res.error || "").toLowerCase();
@@ -2552,6 +2551,30 @@ async function runAutoSendLoop(ctx, phone, method) {
       consecutiveTimeouts = 0;
     }
 
+    const isTempDone =
+      res.state === "TEMPORARY_DONE" ||
+      String(res.rawReason || res.reason || "").toLowerCase() === "too_many_guesses";
+
+    if (isTempDone) {
+      stoppedReason = "locked";
+      await sendTempStatus(ctx, buildTempStatusText({
+        title: "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ ꜱᴇʟᴇꜱᴀɪ",
+        phone: res.phone || phone,
+        method,
+        lastStatus: "ʟɪᴍɪᴛ / ᴛᴇᴍᴘᴏʀᴀʀʏ",
+        jeda: formatCooldown(Math.max(effectiveCd, 600)),
+        attempt,
+        successCount,
+        methods,
+        devOn,
+        footer: [
+          "ⓘ ᴘʀᴏꜱᴇꜱ ʙᴇʀʜᴀꜱɪʟ — ᴋᴏʟᴏᴍ ᴋᴏᴅᴇ 6 ᴅɪɢɪᴛ ꜱᴜᴅᴀʜ ʟɪᴍɪᴛ.",
+          "ⓘ ɴᴏᴍᴏʀ ꜱᴜᴅᴀʜ ᴛᴇᴍᴘᴏʀᴀʀʏ / ᴛɪᴅᴀᴋ ʙɪꜱᴀ ɪꜱɪ ᴋᴏᴅᴇ ꜱᴇᴍᴇɴᴛᴀʀᴀ."
+        ]
+      }), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }), { forceNew: false });
+      break;
+    }
+
     if (allMethodsLocked(methods, devOn) || (hard && allMethodsLocked(methods, devOn))) {
       stoppedReason = "locked";
       await sendTempStatus(ctx, buildTempStatusText({
@@ -2565,7 +2588,7 @@ async function runAutoSendLoop(ctx, phone, method) {
         methods,
         devOn,
         footer: "ⓘ ꜱᴇᴍᴜᴀ ᴍᴇᴛᴏᴅᴇ ᴛᴇʀᴋᴜɴᴄɪ — ɴᴏᴍᴏʀ ꜱᴜᴅᴀʜ ᴛᴇᴍᴘᴏʀᴀʀʏ."
-      }), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }), { forceNew: true });
+      }), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }), { forceNew: false });
       break;
     }
 
@@ -2582,7 +2605,7 @@ async function runAutoSendLoop(ctx, phone, method) {
         methods,
         devOn,
         footer: "ⓘ ᴄᴏᴏʟᴅᴏᴡɴ ᴋᴇʀᴀꜱ (≥10 ᴍᴇɴɪᴛ / ʟɪᴍɪᴛ ꜱᴇʀᴠᴇʀ)."
-      }), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }), { forceNew: true });
+      }), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }), { forceNew: false });
       break;
     }
 
@@ -2598,7 +2621,7 @@ async function runAutoSendLoop(ctx, phone, method) {
         methods,
         devOn,
         footer: `ⓘ ᴀʟᴀꜱᴀɴ ⦂ ${esc(res.error || res.state || "gagal")}`
-      }), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }), { forceNew: true });
+      }), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }), { forceNew: false });
       break;
     }
 
@@ -2630,10 +2653,10 @@ async function runAutoSendLoop(ctx, phone, method) {
         methods,
         devOn,
         footer: [
-          "ⓘ ᴍᴇɴᴜɴɢɢᴜ ᴊᴇᴅᴀ ꜱᴇʟᴇꜱᴀɪ.",
+          "ⓘ ᴍᴇɴᴜɴɢɢᴜ ᴊᴇᴅᴀ ꜱᴇꜱᴜᴀɪ ʀᴇꜱᴘᴏɴ ᴡᴀ.",
           "ⓘ ᴛᴇᴋᴀɴ <b>⏹ ꜱᴛᴏᴘ</b> ᴜɴᴛᴜᴋ ʙᴇʀʜᴇɴᴛɪ."
         ]
-      }), stopKb, { forceNew: true });
+      }), stopKb, { forceNew: false });
 
       await sleepCancellable(job, waitSec * 1000, 200);
       if (job.cancelled) {
@@ -2644,13 +2667,13 @@ async function runAutoSendLoop(ctx, phone, method) {
       await sendTempStatus(ctx, buildTempStatusText({
         phone: res.phone || phone,
         method,
-        lastStatus: "ᴊᴇᴅᴀ ꜱᴇʟᴇꜱᴀɪ · ᴍᴇɴɢɪʀɪᴍ ᴜʟᴀɴɢ",
+        lastStatus: "ᴍᴇɴɢɪʀɪᴍ ᴜʟᴀɴɢ",
         attempt,
         successCount,
         methods,
         devOn,
         footer: "ⓘ ᴛᴇᴋᴀɴ <b>⏹ ꜱᴛᴏᴘ</b> ᴜɴᴛᴜᴋ ʙᴇʀʜᴇɴᴛɪ."
-      }), stopKb);
+      }), stopKb, { forceNew: false });
       continue;
     }
 
@@ -2672,7 +2695,7 @@ async function runAutoSendLoop(ctx, phone, method) {
           "ⓘ ᴋᴏɴᴇᴋꜱɪ ᴋᴇ ꜱᴇʀᴠᴇʀ ᴡᴀ ɢᴀɢᴀʟ ʙᴇʀᴜʟᴀɴɢ.",
           "ⓘ ᴄᴇᴋ ᴘʀᴏxʏ / ᴄᴏʙᴀ ʟᴀɢɪ ʙᴇʙᴇʀᴀᴘᴀ ꜱᴀᴀᴛ."
         ]
-      }), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }), { forceNew: true });
+      }), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }), { forceNew: false });
       break;
     }
 
@@ -2692,7 +2715,6 @@ async function runAutoSendLoop(ctx, phone, method) {
       break;
     }
 
-    // Anti-spam: edit pesan yang sama, max 1 update tiap 4 detik
     const now = Date.now();
     if (now - lastSpamAt >= 4000 || attempt === 1) {
       lastSpamAt = now;
@@ -2713,7 +2735,6 @@ async function runAutoSendLoop(ctx, phone, method) {
   }
 
   if ((job.cancelled || stoppedReason === "cancelled") && stoppedReason !== "locked" && stoppedReason !== "failed") {
-    // UI sudah di-set di handler cancel_send; jangan spam pesan lagi
   }
 
   if (activeSendJobs.get(userId) === job) {
@@ -2762,7 +2783,6 @@ bot.action(/^temp_start_(sms|voice|flash|email|wa_old)$/i, async (ctx) => {
     return editInline(ctx, "⚠ ɴᴏᴍᴏʀ ᴛɪᴅᴀᴋ ᴅɪᴛᴇᴍᴜᴋᴀɴ. ᴜʟᴀɴɢɪ ᴅᴀʀɪ ᴍᴇɴᴜ ᴛᴇᴍᴘᴏʀᴀʀʏ.", inlineKb([[btn("✕ ᴛᴜᴛᴜᴘ", "cancel_send", "danger")]]));
   }
   pendingSendMethod.set(userId, method);
-  // Auto-edit panel konfirmasi → status mulai (tanpa pesan baru)
   try {
     await editInline(ctx, buildTempStatusText({
       phone,
