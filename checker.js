@@ -2,7 +2,7 @@ const dns = require("dns");
 if (typeof dns.setDefaultResultOrder === "function") dns.setDefaultResultOrder("ipv4first");
 const WADetector = require("./walz-loader");
 
-const DEFAULT_TIMEOUT_MS = parseInt(process.env.WA_TIMEOUT_MS || "12000", 10);
+const DEFAULT_TIMEOUT_MS = parseInt(process.env.WA_TIMEOUT_MS || "20000", 10);
 
 function buildProxyUrlFromEnv() {
   if (process.env.PROXY_URL) return String(process.env.PROXY_URL).trim();
@@ -610,7 +610,7 @@ async function callWAWithRetry(reqObj, userAgent, sharedHeaders, timeoutMs, retr
       const msg = String(e && e.message ? e.message : e);
       if (msg === "CANCELLED") throw e;
       if (!/NETWORK_ERROR|REQUEST_TIMEOUT|HTTP_5|EMPTY_UPSTREAM|HTTP_429/i.test(msg)) break;
-      if (i < retries) await new Promise(r => setTimeout(r, 400 + i * 500));
+      if (i < retries) await new Promise(r => setTimeout(r, 500 + i * 600));
     }
   }
   throw lastErr;
@@ -622,7 +622,7 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
   const methodKey = allowed.has(String(method || "").toLowerCase()) ? String(method).toLowerCase() : "sms";
   const skipProbe = Boolean(options.skipProbe);
   const signal = options.signal || null;
-  const sendTimeout = parseInt(process.env.WA_SEND_TIMEOUT_MS || "12000", 10);
+  const sendTimeout = parseInt(process.env.WA_SEND_TIMEOUT_MS || "22000", 10);
 
   const assertNotCancelled = () => {
     if (signal && signal.aborted) throw new Error("CANCELLED");
