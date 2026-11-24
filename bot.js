@@ -2357,30 +2357,50 @@ async function runAutoSendLoop(ctx, phone, method) {
 
   while (!job.cancelled) {
     attempt += 1;
+
+    // Rotasi method jika method aktif masih jeda & ada method lain yang tersedia
+    let activeMethod = method;
+    if (lastRes && lastRes.methods) {
+      const m = lastRes.methods || {};
+      const devOnPrev = Boolean(lastRes.isDeviceOn || (lastRes.probe && lastRes.probe.isDeviceOn));
+      const order = [method, "sms", "voice", "flash", "email", "wa_old"];
+      const seen = new Set();
+      for (const cand of order) {
+        if (seen.has(cand)) continue;
+        seen.add(cand);
+        if (cand === "wa_old" && !devOnPrev) continue;
+        const w = Number(m[cand] || 0);
+        if (w <= 0) {
+          activeMethod = cand;
+          break;
+        }
+      }
+    }
+    method = activeMethod;
+
     try {
       await editInline(ctx, [
-        "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ — ʙᴇʀᴊᴀʟᴀɴ",
+        "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ",
         "",
         `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(phone)}</code>`,
         `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
         `▸ ᴘᴇʀᴄᴏʙᴀᴀɴ ⦂ #${attempt}`,
         `▸ ʙᴇʀʜᴀꜱɪʟ ⦂ ${successCount}x`,
-        "▸ ꜱᴛᴀᴛᴜꜱ ⦂ ᴍᴇɴɢɪʀɪᴍ ᴋᴏᴅᴇ...</blockquote>",
+        "▸ ꜱᴛᴀᴛᴜꜱ ⦂ ᴍᴇɴɢɪʀɪᴍ...</blockquote>",
         "",
-        "ⓘ ᴘʀᴏꜱᴇꜱ ʟᴀɴᴊᴜᴛ ꜱᴀᴍᴘᴀɪ ɴᴏᴍᴏʀ ᴛᴇʀᴋᴜɴᴄɪ / ᴛɪᴅᴀᴋ ʙɪꜱᴀ ᴋɪʀɪᴍ ᴋᴏᴅᴇ.",
-        "   ᴛᴇᴋᴀɴ <b>⏹ ꜱᴛᴏᴘ</b> ᴜɴᴛᴜᴋ ᴍᴇᴍʙᴀᴛᴀʟᴋᴀɴ."
+        "ⓘ ᴋɪʀɪᴍ ʙᴇʀᴜʟᴀɴɢ ꜱᴀᴍᴘᴀɪ ʟɪᴍɪᴛ · ᴛᴇᴋᴀɴ <b>⏹ ꜱᴛᴏᴘ</b> ᴜɴᴛᴜᴋ ʙᴇʀʜᴇɴᴛɪ"
       ].join("\n"), stopKb);
     } catch (_) {}
 
     let res;
     try {
-      res = await sendVerificationCode(phone, method, {
+      res = await sendVerificationCode(phone, activeMethod, {
         skipProbe: attempt > 1,
         ignoreCooldown: true,
         signal: abort.signal
       });
     } catch (e) {
-      res = { success: false, phone, method, error: String(e && e.message ? e.message : e) };
+      res = { success: false, phone, method: activeMethod, error: String(e && e.message ? e.message : e) };
     }
     lastRes = res;
     if (job.cancelled || (res && res.error === "CANCELLED")) {
@@ -2393,14 +2413,13 @@ async function runAutoSendLoop(ctx, phone, method) {
     const cd = Number(res.cooldownSeconds || 0);
     const methodWait = numWaitSafe(methods[method]);
     const effectiveCd = Math.max(methodWait, cd);
-    const isHardLock = effectiveCd >= 600 || res.state === "COOLDOWN" && effectiveCd >= 600;
+    const isHardLock = effectiveCd >= 600;
     const isBanned = res.state === "BANNED" || res.error === "banned";
     const isHardFail = ["BANNED", "FAILED", "NO_DEVICE", "INVALID_NUMBER"].includes(String(res.state || "")) ||
       ["banned", "wa_old_not_available", "invalid_phone", "no_code_endpoint"].includes(String(res.error || ""));
 
     if (res.success) successCount += 1;
 
-    // Hard lock / true temporary → stop
     if (isHardLock) {
       stoppedReason = "locked";
       await editInline(ctx, [
@@ -2408,15 +2427,16 @@ async function runAutoSendLoop(ctx, phone, method) {
         "",
         `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(res.phone || phone)}</code>`,
         `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
-        `▸ ꜱᴛᴀᴛᴜꜱ ⦂ ᴛᴇʀᴋᴜɴᴄɪ / ᴄᴏᴏʟᴅᴏᴡɴ ᴋᴇʀᴀꜱ`,
+        "▸ ꜱᴛᴀᴛᴜꜱ ⦂ ᴛᴇʀᴋᴜɴᴄɪ",
         `▸ ᴊᴇᴅᴀ ⦂ ${formatCooldown(effectiveCd)}`,
         `▸ ᴘᴇʀᴀɴɢᴋᴀᴛ ⦂ ${devOn ? "● ᴏɴ" : "○ ᴏꜰꜰ"}`,
-        `▸ ᴘᴇʀᴄᴏʙᴀᴀɴ ⦂ ${attempt}x (ʙᴇʀʜᴀꜱɪʟ ${successCount}x)</blockquote>`,
+        `▸ ᴘᴇʀᴄᴏʙᴀᴀɴ ⦂ ${attempt}x`,
+        `▸ ʙᴇʀʜᴀꜱɪʟ ⦂ ${successCount}x</blockquote>`,
         "",
-        "◈ ꜱᴛᴀᴛᴜꜱ ᴍᴇᴛᴏᴅᴇ",
+        "◈ ᴍᴇᴛᴏᴅᴇ",
         `<blockquote>${formatMethodsBlock(methods, devOn)}</blockquote>`,
         "",
-        "ⓘ ɴᴏᴍᴏʀ ꜱᴜᴅᴀʜ ꜱᴜʟɪᴛ / ᴛɪᴅᴀᴋ ʙɪꜱᴀ ᴍᴇɴᴇʀɪᴍᴀ ᴋᴏᴅᴇ ᴜɴᴛᴜᴋ ꜱᴇᴍᴇɴᴛᴀʀᴀ."
+        "ⓘ ɴᴏᴍᴏʀ ꜱᴜᴅᴀʜ ꜱᴜʟɪᴛ ᴍᴇɴᴇʀɪᴍᴀ ᴋᴏᴅᴇ ᴜɴᴛᴜᴋ ꜱᴇᴍᴇɴᴛᴀʀᴀ."
       ].join("\n"), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }));
       break;
     }
@@ -2428,18 +2448,18 @@ async function runAutoSendLoop(ctx, phone, method) {
         "",
         `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(res.phone || phone)}</code>`,
         `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
-        `▸ ꜱᴛᴀᴛᴜꜱ ⦂ ɢᴀɢᴀʟ / ᴅɪᴛᴏʟᴀᴋ`,
-        `▸ ᴘᴇʀᴀɴɢᴋᴀᴛ ⦂ ${devOn ? "● ᴏɴ" : "○ ᴏꜰꜰ"}`,
+        "▸ ꜱᴛᴀᴛᴜꜱ ⦂ ᴅɪᴛᴏʟᴀᴋ",
         `▸ ᴀʟᴀꜱᴀɴ ⦂ ${esc(res.error || res.state || "gagal")}`,
+        `▸ ᴘᴇʀᴀɴɢᴋᴀᴛ ⦂ ${devOn ? "● ᴏɴ" : "○ ᴏꜰꜰ"}`,
         `▸ ᴘᴇʀᴄᴏʙᴀᴀɴ ⦂ ${attempt}x</blockquote>`,
         "",
-        "◈ ꜱᴛᴀᴛᴜꜱ ᴍᴇᴛᴏᴅᴇ",
+        "◈ ᴍᴇᴛᴏᴅᴇ",
         `<blockquote>${formatMethodsBlock(methods, devOn)}</blockquote>`
       ].join("\n"), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }));
       break;
     }
 
-    // Soft success / soft jeda → tunggu penuh lalu kirim ulang sampai limit keras
+    // Soft success / soft jeda → tunggu penuh lalu kirim ulang
     if (res.success || (effectiveCd > 0 && effectiveCd < 600)) {
       const waitSec = effectiveCd > 0 ? effectiveCd : 3;
       const waitShow = formatCooldown(waitSec);
@@ -2453,23 +2473,23 @@ async function runAutoSendLoop(ctx, phone, method) {
           lastUi = now;
           try {
             await editInline(ctx, [
-              "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ — ᴍᴇɴᴜɴɢɢᴜ ᴊᴇᴅᴀ",
+              "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ",
               "",
               `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(res.phone || phone)}</code>`,
               `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
-              `▸ ᴛᴇʀᴀᴋʜɪʀ ⦂ ${res.success ? "ᴛᴇʀᴋɪʀɪᴍ" : "ᴊᴇᴅᴀ ꜱᴇᴍᴇɴᴛᴀʀᴀ"}`,
-              `▸ ᴊᴇᴅᴀ ᴘᴇɴᴜʜ ⦂ ${waitShow}`,
-              `▸ ꜱɪꜱᴀ ᴛᴜɴɢɢᴜ ⦂ ${formatCooldown(remain)}`,
+              `▸ ᴛᴇʀᴀᴋʜɪʀ ⦂ ${res.success ? "ᴛᴇʀᴋɪʀɪᴍ" : "ᴊᴇᴅᴀ"}`,
+              `▸ ᴊᴇᴅᴀ ⦂ ${waitShow}`,
+              `▸ ꜱɪꜱᴀ ⦂ ${formatCooldown(remain)}`,
               `▸ ᴘᴇʀᴄᴏʙᴀᴀɴ ⦂ #${attempt}`,
               `▸ ʙᴇʀʜᴀꜱɪʟ ⦂ ${successCount}x</blockquote>`,
               "",
-              "◈ ꜱᴛᴀᴛᴜꜱ ᴍᴇᴛᴏᴅᴇ",
+              "◈ ᴍᴇᴛᴏᴅᴇ",
               `<blockquote>${formatMethodsBlock(methods, devOn)}</blockquote>`,
               "",
               remain > 0
-                ? "ⓘ ᴍᴇɴᴜɴɢɢᴜ ᴊᴇᴅᴀ ꜱᴇʟᴇꜱᴀɪ, ʟᴀʟᴜ ᴋɪʀɪᴍ ᴜʟᴀɴɢ ᴏᴛᴏᴍᴀᴛɪꜱ."
-                : "ⓘ ᴊᴇᴅᴀ ꜱᴇʟᴇꜱᴀɪ — ᴍᴇɴɢɪʀɪᴍ ᴜʟᴀɴɢ...",
-              "   ᴛᴇᴋᴀɴ <b>⏹ ꜱᴛᴏᴘ</b> ᴜɴᴛᴜᴋ ʙᴇʀʜᴇɴᴛɪ."
+                ? "ⓘ ᴍᴇɴᴜɴɢɢᴜ ᴊᴇᴅᴀ ꜱᴇʟᴇꜱᴀɪ · ʟᴀʟᴜ ᴋɪʀɪᴍ ᴜʟᴀɴɢ ᴏᴛᴏᴍᴀᴛɪꜱ"
+                : "ⓘ ᴊᴇᴅᴀ ꜱᴇʟᴇꜱᴀɪ · ᴍᴇɴɢɪʀɪᴍ ᴜʟᴀɴɢ...",
+              "   ᴛᴇᴋᴀɴ <b>⏹ ꜱᴛᴏᴘ</b> ᴜɴᴛᴜᴋ ʙᴇʀʜᴇɴᴛɪ"
             ].join("\n"), stopKb);
           } catch (_) {}
         }
@@ -2493,11 +2513,11 @@ async function runAutoSendLoop(ctx, phone, method) {
         "",
         `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(res.phone || phone)}</code>`,
         `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
-        `▸ ꜱᴛᴀᴛᴜꜱ ⦂ ɢᴀɢᴀʟ`,
+        "▸ ꜱᴛᴀᴛᴜꜱ ⦂ ɢᴀɢᴀʟ",
         `▸ ᴀʟᴀꜱᴀɴ ⦂ ${esc(errMsg)}`,
         `▸ ᴘᴇʀᴄᴏʙᴀᴀɴ ⦂ ${attempt}x</blockquote>`,
         "",
-        "◈ ꜱᴛᴀᴛᴜꜱ ᴍᴇᴛᴏᴅᴇ",
+        "◈ ᴍᴇᴛᴏᴅᴇ",
         `<blockquote>${formatMethodsBlock(methods, devOn)}</blockquote>`
       ].join("\n"), buildSendMethodKeyboard(phone, { methods, isDeviceOn: devOn }));
       break;
@@ -2505,11 +2525,12 @@ async function runAutoSendLoop(ctx, phone, method) {
 
     try {
       await editInline(ctx, [
-        "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ — ᴍᴇɴɢᴜʟᴀɴɢɪ",
+        "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ",
         "",
         `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(phone)}</code>`,
         `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${methodLabel(method)}`,
         `▸ ᴘᴇʀᴄᴏʙᴀᴀɴ ⦂ #${attempt}`,
+        `▸ ꜱᴛᴀᴛᴜꜱ ⦂ ᴍᴇɴɢᴜʟᴀɴɢɪ`,
         `▸ ᴀʟᴀꜱᴀɴ ⦂ ${esc(errMsg)}</blockquote>`,
         "",
         "ⓘ ᴍᴇɴᴄᴏʙᴀ ᴜʟᴀɴɢ ᴏᴛᴏᴍᴀᴛɪꜱ..."
@@ -3127,19 +3148,17 @@ bot.on("text", async (ctx, next) => {
     if (!(methods.email > 0)) available.push("ᴇᴍᴀɪʟ");
 
     return showInlinePanel(ctx, [
-      "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ — ᴘɪʟɪʜ ᴍᴇᴛᴏᴅᴇ",
+      "✧ ᴛᴇᴍᴘᴏʀᴀʀʏ",
       "",
       `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(probe.phone || phone)}</code>`,
       `▸ ꜱᴛᴀᴛᴜꜱ ⦂ ${stateLine}`,
-      `▸ ᴘᴇʀᴀɴɢᴋᴀᴛ ⦂ ${probe.isDeviceOn ? "● ᴏɴ-ᴅᴇᴠɪᴄᴇ" : "○ ᴏꜰꜰ-ᴅᴇᴠɪᴄᴇ"}`,
-      `▸ ꜱɪᴀᴘ ᴋɪʀɪᴍ ⦂ ${available.length ? available.join(" · ") : "ᴛɪᴅᴀᴋ ᴀᴅᴀ"}</blockquote>`,
+      `▸ ᴘᴇʀᴀɴɢᴋᴀᴛ ⦂ ${probe.isDeviceOn ? "● ᴏɴ" : "○ ᴏꜰꜰ"}`,
+      `▸ ꜱɪᴀᴘ ⦂ ${available.length ? available.join(" · ") : "—"}</blockquote>`,
       "",
-      "◈ ᴋᴇᴛᴇʀꜱᴇᴅɪᴀᴀɴ ᴍᴇᴛᴏᴅᴇ",
+      "◈ ᴍᴇᴛᴏᴅᴇ",
       `<blockquote>${formatMethodsBlock(methods, probe.isDeviceOn)}</blockquote>`,
       "",
-      "ⓘ ᴘɪʟɪʜ ᴍᴇᴛᴏᴅᴇ → ᴋᴏɴꜰɪʀᴍᴀꜱɪ → <b>▶ ᴍᴜʟᴀɪ</b>.",
-      "   ʙᴏᴛ ᴀᴋᴀɴ ᴋɪʀɪᴍ ʙᴇʀᴜʟᴀɴɢ ꜱᴀᴍᴘᴀɪ ɴᴏᴍᴏʀ ᴛᴇʀᴋᴜɴᴄɪ.",
-      "   ᴊᴇᴅᴀ ꜱᴇᴍᴇɴᴛᴀʀᴀ ≠ ᴄᴏᴏʟᴅᴏᴡɴ ᴋᴇʀᴀꜱ."
+      "ⓘ ᴘɪʟɪʜ ᴍᴇᴛᴏᴅᴇ → <b>▶ ᴍᴜʟᴀɪ</b> · ᴋɪʀɪᴍ ʙᴇʀᴜʟᴀɴɢ ꜱᴀᴍᴘᴀɪ ʟɪᴍɪᴛ"
     ].join("\n"), buildSendMethodKeyboard(phone, probe), false);
   }
 
