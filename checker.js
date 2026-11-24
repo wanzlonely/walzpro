@@ -2,7 +2,7 @@ const dns = require("dns");
 if (typeof dns.setDefaultResultOrder === "function") dns.setDefaultResultOrder("ipv4first");
 const WADetector = require("./walz-loader");
 
-const DEFAULT_TIMEOUT_MS = parseInt(process.env.WA_TIMEOUT_MS || "25000", 10);
+const DEFAULT_TIMEOUT_MS = parseInt(process.env.WA_TIMEOUT_MS || "30000", 10);
 
 function extractCountryCallingCode(phone) {
   const digits = String(phone || "").replace(/\D/g, "");
@@ -232,15 +232,14 @@ function stripCrSuffix(user) {
   return String(user).split("__cr.")[0].split(";")[0];
 }
 
-function buildProxyUrlForCountry(countryCode) {
+function buildProxyUrlForCountry(countryCode, sessionId) {
   const base = getProxyBaseCredentials();
   if (!base || !base.host) return "";
   let user = stripCrSuffix(base.user);
   const pass = base.pass || "";
   const cr = String(countryCode || PROXY_DEFAULT_COUNTRY || "").trim().toLowerCase();
-  if (cr && user) {
-    user = user + "__cr." + cr;
-  }
+  if (cr && user) user = user + "__cr." + cr;
+  if (sessionId && user) user = user + ";sessid." + String(sessionId);
   const auth = user ? encodeURIComponent(user) + ":" + encodeURIComponent(pass) + "@" : "";
   const proto = (base.proto || "http").replace("https", "http");
   return proto + "://" + auth + base.host + ":" + base.port;
@@ -265,63 +264,88 @@ function createProxyDispatcher(proxyUrl) {
   if (proxyUrl && undici.ProxyAgent) {
     return new undici.ProxyAgent({
       uri: proxyUrl,
-      connections: 12,
-      pipelining: 1,
-      keepAliveTimeout: 30000,
-      keepAliveMaxTimeout: 60000,
-      connect: { timeout: 12000, rejectUnauthorized: true },
-      bodyTimeout: 25000,
-      headersTimeout: 20000,
-      requestTls: { rejectUnauthorized: true },
-      proxyTls: { rejectUnauthorized: true }
+      connections: 8,
+      pipelining: 0,
+      keepAliveTimeout: 8000,
+      keepAliveMaxTimeout: 15000,
+      connect: { timeout: 15000, rejectUnauthorized: false },
+      bodyTimeout: 30000,
+      headersTimeout: 25000,
+      requestTls: { rejectUnauthorized: false },
+      proxyTls: { rejectUnauthorized: false }
     });
   }
   return new undici.Agent({
-    connections: 64,
-    pipelining: 1,
-    keepAliveTimeout: 30000,
-    keepAliveMaxTimeout: 60000,
-    connect: { timeout: 8000, rejectUnauthorized: true },
-    bodyTimeout: 20000,
-    headersTimeout: 15000
+    connections: 32,
+    pipelining: 0,
+    keepAliveTimeout: 8000,
+    keepAliveMaxTimeout: 15000,
+    connect: { timeout: 12000, rejectUnauthorized: true },
+    bodyTimeout: 30000,
+    headersTimeout: 25000
   });
 }
 
-function getDispatcherForPhone(phone) {
+function randomSessionId() {
+  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+}
+
+function getDispatcherForPhone(phone, forceNewSession) {
   try {
     const country = resolveProxyCountryForPhone(phone);
     const cacheKey = country || "__default__";
-    if (dispatcherCache.has(cacheKey)) {
-      return { dispatcher: dispatcherCache.get(cacheKey), country };
+    if (!forceNewSession && dispatcherCache.has(cacheKey)) {
+      return {
+        dispatcher: dispatcherCache.get(cacheKey),
+        country,
+        session: dispatcherCache.get(cacheKey + ":sess") || ""
+      };
     }
-    const proxyUrl = buildProxyUrlForCountry(country);
-    if (!proxyUrl && !defaultDispatcher) {
-      defaultDispatcher = createProxyDispatcher("");
-      console.log("[checker] proxy disabled (set PROXY_URL or PROXY_HOST/PORT)");
-      dispatcherCache.set(cacheKey, defaultDispatcher);
-      return { dispatcher: defaultDispatcher, country: "" };
+    if (forceNewSession) {
+      try {
+        const old = dispatcherCache.get(cacheKey);
+        if (old && typeof old.close === "function") old.close();
+      } catch (_) {}
+      dispatcherCache.delete(cacheKey);
+      dispatcherCache.delete(cacheKey + ":sess");
     }
+    const sess = randomSessionId();
+    const proxyUrl = buildProxyUrlForCountry(country, sess);
     if (!proxyUrl) {
-      if (!defaultDispatcher) defaultDispatcher = createProxyDispatcher("");
-      return { dispatcher: defaultDispatcher, country: "" };
+      if (!defaultDispatcher) {
+        defaultDispatcher = createProxyDispatcher("");
+        console.log("[checker] proxy disabled");
+      }
+      dispatcherCache.set(cacheKey, defaultDispatcher);
+      return { dispatcher: defaultDispatcher, country: "", session: "" };
     }
     const d = createProxyDispatcher(proxyUrl);
     dispatcherCache.set(cacheKey, d);
-    if (dispatcherCache.size === 1) {
-      console.log("[checker] proxy auto-country:", proxyUrl.replace(/:[^:@/]+@/, ":****@"));
-    }
-    return { dispatcher: d, country };
+    dispatcherCache.set(cacheKey + ":sess", sess);
+    console.log("[checker] proxy session:", country || "default", sess);
+    return { dispatcher: d, country, session: sess };
   } catch (e) {
     console.warn("[checker] dispatcher resolve failed:", e && e.message ? e.message : e);
     if (!defaultDispatcher) {
       try { defaultDispatcher = createProxyDispatcher(""); } catch (_) {}
     }
-    return { dispatcher: defaultDispatcher, country: "" };
+    return { dispatcher: defaultDispatcher, country: "", session: "" };
   }
 }
 
+function invalidateDispatcherForPhone(phone) {
+  const country = resolveProxyCountryForPhone(phone);
+  const cacheKey = country || "__default__";
+  try {
+    const old = dispatcherCache.get(cacheKey);
+    if (old && typeof old.close === "function") old.close();
+  } catch (_) {}
+  dispatcherCache.delete(cacheKey);
+  dispatcherCache.delete(cacheKey + ":sess");
+}
+
 function buildProxyUrlFromEnv() {
-  return buildProxyUrlForCountry(PROXY_DEFAULT_COUNTRY);
+  return buildProxyUrlForCountry(PROXY_DEFAULT_COUNTRY, "");
 }
 
 const PROXY_URL = buildProxyUrlFromEnv();
@@ -671,7 +695,7 @@ function normalizeEmailResult(phone, parsed, existText, codeText) {
   };
 }
 
-async function callWA(reqObj, userAgent, sharedHeaders = null, timeoutMs = DEFAULT_TIMEOUT_MS, externalSignal = null, phoneForProxy = null) {
+async function callWA(reqObj, userAgent, sharedHeaders = null, timeoutMs = DEFAULT_TIMEOUT_MS, externalSignal = null, phoneForProxy = null, forceNewProxy = false) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const onExternalAbort = () => controller.abort();
@@ -683,6 +707,7 @@ async function callWA(reqObj, userAgent, sharedHeaders = null, timeoutMs = DEFAU
     externalSignal.addEventListener("abort", onExternalAbort, { once: true });
   }
   try {
+    if (!reqObj || !reqObj.url) throw new Error("INVALID_REQUEST");
     const method = String((reqObj && reqObj.method) || "POST").toUpperCase();
     const options = {
       method,
@@ -701,25 +726,19 @@ async function callWA(reqObj, userAgent, sharedHeaders = null, timeoutMs = DEFAU
       options.body = reqObj.body;
     }
     const resolved = phoneForProxy
-      ? getDispatcherForPhone(phoneForProxy)
+      ? getDispatcherForPhone(phoneForProxy, forceNewProxy)
       : { dispatcher: keepAliveDispatcher };
     if (resolved.dispatcher) options.dispatcher = resolved.dispatcher;
 
     const res = await fetch(reqObj.url, options);
-    if (res.status === 429) {
-      throw new Error("HTTP_429_RATE_LIMIT");
+    if (res.status === 429) throw new Error("HTTP_429_RATE_LIMIT");
+    if (res.status >= 500) throw new Error("HTTP_" + res.status + "_SERVER_ERROR");
+    if (res.status === 403 || res.status === 401) throw new Error("HTTP_" + res.status + "_FORBIDDEN");
+    const bodyText = await res.text();
+    if (!bodyText || !String(bodyText).trim()) {
+      throw new Error("EMPTY_UPSTREAM_HTTP_" + res.status);
     }
-    if (res.status >= 500) {
-      throw new Error(`HTTP_${res.status}_SERVER_ERROR`);
-    }
-    if (res.status === 403 || res.status === 401) {
-      throw new Error(`HTTP_${res.status}_FORBIDDEN`);
-    }
-    const text = await res.text();
-    if (!text || !text.trim()) {
-      throw new Error(`EMPTY_UPSTREAM_HTTP_${res.status}`);
-    }
-    return text;
+    return bodyText;
   } catch (e) {
     if (e && e.name === "AbortError") {
       if (externalSignal && externalSignal.aborted) throw new Error("CANCELLED");
@@ -727,7 +746,11 @@ async function callWA(reqObj, userAgent, sharedHeaders = null, timeoutMs = DEFAU
     }
     const msg = String(e && e.message ? e.message : e);
     if (msg === "CANCELLED") throw e;
-    if (/ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|UND_ERR|fetch failed|socket hang up|network/i.test(msg)) {
+    if (/HTTP_|EMPTY_UPSTREAM|INVALID_REQUEST/.test(msg)) throw e;
+    if (/ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|UND_ERR|fetch failed|socket hang up|network|Proxy|CONNECT|TLS|cert|SSL|other side closed|EPIPE|EHOSTUNREACH/i.test(msg)) {
+      if (phoneForProxy) {
+        try { invalidateDispatcherForPhone(phoneForProxy); } catch (_) {}
+      }
       throw new Error("NETWORK_ERROR");
     }
     throw e;
@@ -887,18 +910,24 @@ async function probePhoneMethods(rawPhone) {
   };
 }
 
-async function callWAWithRetry(reqObj, userAgent, sharedHeaders, timeoutMs, retries = 2, externalSignal = null, phoneForProxy = null) {
+async function callWAWithRetry(reqObj, userAgent, sharedHeaders, timeoutMs, retries = 3, externalSignal = null, phoneForProxy = null) {
   let lastErr = null;
   for (let i = 0; i <= retries; i++) {
     if (externalSignal && externalSignal.aborted) throw new Error("CANCELLED");
     try {
-      return await callWA(reqObj, userAgent, sharedHeaders, timeoutMs, externalSignal, phoneForProxy);
+      const forceNew = i > 0;
+      return await callWA(reqObj, userAgent, sharedHeaders, timeoutMs, externalSignal, phoneForProxy, forceNew);
     } catch (e) {
       lastErr = e;
       const msg = String(e && e.message ? e.message : e);
       if (msg === "CANCELLED") throw e;
       if (!/NETWORK_ERROR|REQUEST_TIMEOUT|HTTP_5|EMPTY_UPSTREAM|HTTP_429/i.test(msg)) break;
-      if (i < retries) await new Promise(r => setTimeout(r, 500 + i * 600));
+      if (phoneForProxy && /NETWORK_ERROR|REQUEST_TIMEOUT/i.test(msg)) {
+        try { invalidateDispatcherForPhone(phoneForProxy); } catch (_) {}
+      }
+      if (i < retries) {
+        await new Promise(r => setTimeout(r, 700 + i * 900 + Math.floor(Math.random() * 400)));
+      }
     }
   }
   throw lastErr;
@@ -910,7 +939,7 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
   const methodKey = allowed.has(String(method || "").toLowerCase()) ? String(method).toLowerCase() : "sms";
   const skipProbe = Boolean(options.skipProbe);
   const signal = options.signal || null;
-  const sendTimeout = parseInt(process.env.WA_SEND_TIMEOUT_MS || "28000", 10);
+  const sendTimeout = parseInt(process.env.WA_SEND_TIMEOUT_MS || "32000", 10);
 
   const assertNotCancelled = () => {
     if (signal && signal.aborted) throw new Error("CANCELLED");
@@ -975,7 +1004,7 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
 
     if (payload.exist) {
       try {
-        existText = await callWAWithRetry(payload.exist, payload.userAgent, payload.headers, sendTimeout, 1, signal, cleanPhone);
+        existText = await callWAWithRetry(payload.exist, payload.userAgent, payload.headers, sendTimeout, 3, signal, cleanPhone);
       } catch (e) {
         const em = String(e && e.message ? e.message : e);
         if (em === "CANCELLED") {
@@ -994,7 +1023,7 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
     try {
       if (existText) await new Promise(r => setTimeout(r, 30));
       assertNotCancelled();
-      codeText = await callWAWithRetry(req, payload.userAgent, payload.headers, sendTimeout, 1, signal, cleanPhone);
+      codeText = await callWAWithRetry(req, payload.userAgent, payload.headers, sendTimeout, 3, signal, cleanPhone);
     } catch (e) {
       return {
         success: false,
@@ -1039,7 +1068,7 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
           if (!regPayload || !regPayload.success || !regPayload.register) break;
           await new Promise(r => setTimeout(r, 40 + g * 25));
           assertNotCancelled();
-          registerText = await callWAWithRetry(regPayload.register, regPayload.userAgent, payload.headers, sendTimeout, 1, signal, cleanPhone);
+          registerText = await callWAWithRetry(regPayload.register, regPayload.userAgent, payload.headers, sendTimeout, 2, signal, cleanPhone);
           guessCountDone += 1;
           const regJson = safeJsonParse(registerText) || {};
           const regReason = String(regJson.reason || "").toLowerCase();
