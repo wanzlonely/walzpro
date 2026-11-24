@@ -644,18 +644,7 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
       return { success: false, phone: probe.phone, method: methodKey, state: "BANNED", error: "banned", probe, cooldownSeconds: 0 };
     }
 
-    if (probe && methodKey === "wa_old" && !probe.isDeviceOn) {
-      return {
-        success: false,
-        phone: probe.phone,
-        method: methodKey,
-        state: "NO_DEVICE",
-        error: "wa_old_not_available",
-        probe,
-        cooldownSeconds: 0,
-        methods: probe.methods
-      };
-    }
+    // wa_old selalu dicoba ke endpoint (meski device off)
 
     if (probe && probe.methods) {
       const waitForMethod = numWait(probe.methods[methodKey]);
@@ -815,6 +804,25 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
         maskedEmail: codeJson.email || codeJson.masked_email || existJson.email || (probe && probe.maskedEmail) || null,
         isDeviceOn: deviceOn,
         hasDevice: deviceOn,
+        probe,
+        rawStatus: status,
+        rawReason: reason
+      };
+    }
+
+    // bad_param / method_not_allowed = method tidak valid untuk nomor ini
+    if (reason === "bad_param" || reason === "method_not_allowed" || reason === "provider_timeout") {
+      const blockedMethods = { ...(methods || {}) };
+      blockedMethods[methodKey] = Math.max(numWait(blockedMethods[methodKey]), 3600);
+      return {
+        success: false,
+        phone: formattedPhone,
+        method: methodKey,
+        state: "METHOD_BLOCKED",
+        error: reason,
+        cooldownSeconds: blockedMethods[methodKey],
+        methods: blockedMethods,
+        isDeviceOn: deviceOn,
         probe,
         rawStatus: status,
         rawReason: reason
