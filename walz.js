@@ -2829,27 +2829,31 @@ var WADetector = (() => {
         url: "https://v.whatsapp.net/v2/code",
         body: `ENC=${encCode}`
       },
-      phoneInfo: parsed
+      phoneInfo: parsed,
+      session,
+      waToken,
+      version,
+      platform
     };
   }
 
 
-  async function buildRegisterPayloads(inputPhone, otpCode = "000000") {
+  async function buildRegisterPayloads(inputPhone, otpCode = "000000", reuse = null) {
     const parsed = parsePhoneNumber(inputPhone);
     if (!parsed || !parsed.valid) {
       return { success: false, error: "Format nomor tidak valid" };
     }
-    const platform = "smb_ios";
-    const version = DEFAULT_WA_BUSINESS_VERSION;
-    const userAgent = buildUserAgent(version, platform, "iPhone_15_Pro");
-    const session = createRegistrationSession(parsed.cc, parsed.in, {
+    const platform = (reuse && reuse.platform) || "smb_ios";
+    const version = (reuse && reuse.version) || DEFAULT_WA_BUSINESS_VERSION;
+    const userAgent = (reuse && reuse.userAgent) || buildUserAgent(version, platform, "iPhone_15_Pro");
+    const session = (reuse && reuse.session) || createRegistrationSession(parsed.cc, parsed.in, {
       platform,
       lg: parsed.lg || "id",
       lc: parsed.iso || "ID",
       mcc: parsed.mcc || "510",
       mnc: parsed.mnc || "010"
     });
-    const waToken = computeWAMobileToken(version, parsed.in, true);
+    const waToken = (reuse && reuse.waToken) || computeWAMobileToken(version, parsed.in, true);
     const code = String(otpCode || "000000").replace(/\D/g, "").slice(0, 6).padStart(6, "0");
     const extraPairs = [
       ["code", code],
