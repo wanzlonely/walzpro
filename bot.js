@@ -5,7 +5,7 @@ const fs = require("fs");
 const crypto = require("crypto");
 const { Telegraf } = require("telegraf");
 const { Redis } = require("@upstash/redis");
-const { checkPhone, triggerEmailVerification } = require("./checker");
+const { checkPhone, triggerEmailVerification, sendVerificationCode } = require("./checker");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_IDS = (process.env.ADMIN_IDS || "").split(",").filter(Boolean).map(Number);
@@ -47,6 +47,7 @@ const REWARDS = [
 const MENU_LABELS = {
   DETECT: "◈ ᴅᴇᴛᴇᴋꜱɪ ɴᴏᴍᴏʀ",
   EMAIL_FIX: "✦ ᴍᴜɴᴄᴜʟᴋᴀɴ ᴇᴍᴀɪʟ",
+  SEND_CODE: "✧ ᴋɪʀɪᴍ ᴋᴏᴅᴇ",
   STATUS: "◈ ꜱᴛᴀᴛᴜꜱ ꜱᴀʏᴀ",
   REFERRAL: "❖ ʀᴇꜰᴇʀᴀʟ",
   PREMIUM: "♛ ʙᴇʟɪ ᴘʀᴇᴍɪᴜᴍ",
@@ -74,9 +75,11 @@ const VALID_CC_PREFIXES = new Set([
 let BOT_USERNAME = "";
 const awaitingInput = new Set();
 const awaitingEmailInput = new Set();
+const awaitingSendInput = new Set();
 const adminState = new Map();
 const keyboardMsgIds = new Map();
 const activeInlineMsg = new Map();
+const pendingSendPhone = new Map();
 const today = () => new Date().toISOString().slice(0, 10);
 
 function btn(text, callback_data, style = null) {
@@ -97,7 +100,7 @@ function inlineKb(rows) {
 
 function mainKeyboard(userId) {
   const rows = [
-    [{ text: MENU_LABELS.DETECT }],
+    [{ text: MENU_LABELS.DETECT }, { text: MENU_LABELS.SEND_CODE }],
     [{ text: MENU_LABELS.EMAIL_FIX }],
     [{ text: MENU_LABELS.STATUS }, { text: MENU_LABELS.REFERRAL }],
     [{ text: MENU_LABELS.PREMIUM }, { text: MENU_LABELS.LEADERBOARD }]
@@ -691,18 +694,6 @@ async function sendFreshKeyboardPanel(ctx, text) {
   return sent;
 }
 
-async function ensureKeyboardOwner(ctx) {
-  const userId = ctx.from.id;
-  if (!keyboardMsgIds.has(userId)) {
-    const dash = await buildDashboard(userId, ctx.from);
-    const sent = await ctx.reply(dash, {
-      parse_mode: "HTML",
-      ...mainKeyboard(userId)
-    });
-    keyboardMsgIds.set(userId, sent.message_id);
-  }
-}
-
 async function showPlainPanel(ctx, text, deleteUserTap = true) {
   const userId = ctx.from.id;
   const chatId = ctx.chat.id;
@@ -714,14 +705,19 @@ async function showPlainPanel(ctx, text, deleteUserTap = true) {
   if (kbId) {
     try {
       await ctx.telegram.editMessageText(chatId, kbId, undefined, text, {
-        parse_mode: "HTML"
+        parse_mode: "HTML",
+        ...mainKeyboard(userId)
       });
       return;
     } catch (e) {
       if (String(e.message || "").includes("message is not modified")) return;
     }
   }
-  await sendFreshKeyboardPanel(ctx, text);
+  const sent = await ctx.reply(text, {
+    parse_mode: "HTML",
+    ...mainKeyboard(userId)
+  });
+  keyboardMsgIds.set(userId, sent.message_id);
 }
 
 async function showInlinePanel(ctx, text, kb, deleteUserTap = true) {
@@ -730,7 +726,6 @@ async function showInlinePanel(ctx, text, kb, deleteUserTap = true) {
   if (deleteUserTap && ctx.message && ctx.message.message_id) {
     ctx.deleteMessage().catch(() => {});
   }
-  await ensureKeyboardOwner(ctx);
   const prevInline = activeInlineMsg.get(userId);
   if (prevInline && prevInline.chatId === chatId) {
     try {
@@ -1740,6 +1735,7 @@ bot.start(async (ctx) => {
 bot.hears(MENU_LABELS.DETECT, async (ctx) => {
   const userId = ctx.from.id;
   awaitingEmailInput.delete(userId);
+  awaitingSendInput.delete(userId);
   adminState.delete(userId);
   awaitingInput.add(userId);
   await showInlinePanel(
@@ -1753,6 +1749,7 @@ bot.hears(MENU_LABELS.DETECT, async (ctx) => {
 bot.hears(MENU_LABELS.EMAIL_FIX, async (ctx) => {
   const userId = ctx.from.id;
   awaitingInput.delete(userId);
+  awaitingSendInput.delete(userId);
   adminState.delete(userId);
   awaitingEmailInput.add(userId);
   await showInlinePanel(
@@ -1763,10 +1760,30 @@ bot.hears(MENU_LABELS.EMAIL_FIX, async (ctx) => {
   );
 });
 
+bot.hears(MENU_LABELS.SEND_CODE, async (ctx) => {
+  const userId = ctx.from.id;
+  awaitingInput.delete(userId);
+  awaitingEmailInput.delete(userId);
+  adminState.delete(userId);
+  awaitingSendInput.add(userId);
+  await showInlinePanel(
+    ctx,
+    [
+      "✧ ᴋɪʀɪᴍ ᴋᴏᴅᴇ ᴠᴇʀɪꜰɪᴋᴀꜱɪ",
+      "",
+      "<blockquote>⟡ ᴋɪʀɪᴍ <b>1 ɴᴏᴍᴏʀ</b> ᴛᴀʀɢᴇᴛ.",
+      "⊹ ꜱᴇʟᴀɴᴊᴜᴛɴʏᴀ ᴘɪʟɪʜ ᴍᴇᴛᴏᴅᴇ ⦂ ꜱᴍꜱ / ᴠᴏɪᴄᴇ / ꜰʟᴀꜱʜ / ᴇᴍᴀɪʟ.</blockquote>"
+    ].join("\n"),
+    inlineKb([[btn("✕ ʙᴀᴛᴀʟᴋᴀɴ", "cancel_send", "danger")]]),
+    true
+  );
+});
+
 bot.hears(MENU_LABELS.STATUS, async (ctx) => {
   const userId = ctx.from.id;
   awaitingInput.delete(userId);
   awaitingEmailInput.delete(userId);
+  awaitingSendInput.delete(userId);
   adminState.delete(userId);
   await showPlainPanel(ctx, await buildStatusPage(userId, ctx.from), true);
 });
@@ -2072,6 +2089,42 @@ bot.action("cancel_email", async (ctx) => {
   awaitingEmailInput.delete(userId);
   await ctx.answerCbQuery("ᴅɪʙᴀᴛᴀʟᴋᴀɴ");
   await showPlainPanel(ctx, await buildDashboard(userId, ctx.from), false);
+});
+
+bot.action("cancel_send", async (ctx) => {
+  const userId = ctx.from.id;
+  awaitingSendInput.delete(userId);
+  pendingSendPhone.delete(userId);
+  await ctx.answerCbQuery("ᴅɪʙᴀᴛᴀʟᴋᴀɴ");
+  await showPlainPanel(ctx, await buildDashboard(userId, ctx.from), false);
+});
+
+bot.action(/^send_(sms|voice|flash|email)$/i, async (ctx) => {
+  const userId = ctx.from.id;
+  const method = String(ctx.match[1] || "sms").toLowerCase();
+  const phone = pendingSendPhone.get(userId);
+  await ctx.answerCbQuery();
+  if (!phone) {
+    return editInline(ctx, "⚠ ɴᴏᴍᴏʀ ᴛɪᴅᴀᴋ ᴅɪᴛᴇᴍᴜᴋᴀɴ. ᴜʟᴀɴɢɪ ᴅᴀʀɪ ᴍᴇɴᴜ ᴋɪʀɪᴍ ᴋᴏᴅᴇ.", inlineKb([[btn("✕ ᴛᴜᴛᴜᴘ", "cancel_send", "danger")]]));
+  }
+  pendingSendPhone.delete(userId);
+  await editInline(ctx, `✧ ᴍᴇɴɢɪʀɪᴍ ᴋᴏᴅᴇ ᴠɪᴀ <b>${method.toUpperCase()}</b>...\n<code>${esc(phone)}</code>`, inlineKb([]));
+  const res = await sendVerificationCode(phone, method);
+  const lines = [
+    "✧ ʜᴀꜱɪʟ ᴋɪʀɪᴍ ᴋᴏᴅᴇ",
+    "",
+    `<blockquote>▸ ɴᴏᴍᴏʀ ⦂ <code>${esc(res.phone || phone)}</code>`,
+    `▸ ᴍᴇᴛᴏᴅᴇ ⦂ ${esc(method.toUpperCase())}`,
+    `▸ ꜱᴛᴀᴛᴜꜱ ⦂ ${res.success ? (res.state || "SENT") : "GAGAL"}</blockquote>`
+  ];
+  if (res.success) {
+    if (res.maskedEmail) lines.push(`▸ ᴇᴍᴀɪʟ ⦂ <code>${esc(res.maskedEmail)}</code>`);
+    if (res.cooldownSeconds > 0) lines.push(`▸ ᴊᴇᴅᴀ ⦂ ${formatCooldown(res.cooldownSeconds)}`);
+    lines.push("", "ⓘ ᴄᴇᴋ ᴘᴇʀᴀɴɢᴋᴀᴛ ᴛᴀʀɢᴇᴛ ᴜɴᴛᴜᴋ ᴋᴏᴅᴇ ʏᴀɴɢ ᴍᴀꜱᴜᴋ.");
+  } else {
+    lines.push(`▸ ᴇʀʀᴏʀ ⦂ ${esc(res.error || res.reason || "gagal")}`);
+  }
+  await editInline(ctx, lines.join("\n"), inlineKb([[btn("✧ ᴋɪʀɪᴍ ʟᴀɢɪ", "cancel_send", "primary")]]));
 });
 
 bot.action("referral", async (ctx) => {
@@ -2516,6 +2569,7 @@ bot.on("text", async (ctx, next) => {
   if (txt.startsWith("/") || ALL_MENU_TEXTS.has(txt)) {
     awaitingInput.delete(userId);
     awaitingEmailInput.delete(userId);
+    awaitingSendInput.delete(userId);
     adminState.delete(userId);
     return next();
   }
@@ -2577,6 +2631,28 @@ bot.on("text", async (ctx, next) => {
   if (awaitingEmailInput.has(userId)) {
     awaitingEmailInput.delete(userId);
     return processEmailFix(ctx, txt);
+  }
+
+  if (awaitingSendInput.has(userId)) {
+    awaitingSendInput.delete(userId);
+    const numbers = extractSmartPhoneNumbers(txt);
+    if (numbers.length === 0) {
+      awaitingSendInput.add(userId);
+      return showInlinePanel(ctx, "⚠ ɴᴏᴍᴏʀ ᴛɪᴅᴀᴋ ᴠᴀʟɪᴅ. ᴋɪʀɪᴍ ᴜʟᴀɴɢ 1 ɴᴏᴍᴏʀ.", inlineKb([[btn("✕ ʙᴀᴛᴀʟᴋᴀɴ", "cancel_send", "danger")]]), false);
+    }
+    const phone = numbers[0];
+    pendingSendPhone.set(userId, phone);
+    return showInlinePanel(ctx, [
+      "✧ ᴘɪʟɪʜ ᴍᴇᴛᴏᴅᴇ ᴋɪʀɪᴍ",
+      "",
+      `<blockquote>▸ ᴛᴀʀɢᴇᴛ ⦂ <code>${esc(phone)}</code></blockquote>`,
+      "",
+      "ᴘɪʟɪʜ ꜱᴀʟᴀʜ ꜱᴀᴛᴜ ⦂"
+    ].join("\n"), inlineKb([
+      [btn("ꜱᴍꜱ", "send_sms", "primary"), btn("ᴠᴏɪᴄᴇ", "send_voice", "primary")],
+      [btn("ꜰʟᴀꜱʜ", "send_flash", "primary"), btn("ᴇᴍᴀɪʟ", "send_email", "success")],
+      [btn("✕ ʙᴀᴛᴀʟᴋᴀɴ", "cancel_send", "danger")]
+    ]), false);
   }
 
   if (!awaitingInput.has(userId)) return next();
