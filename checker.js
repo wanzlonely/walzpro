@@ -2,19 +2,19 @@ const dns = require("dns");
 if (typeof dns.setDefaultResultOrder === "function") dns.setDefaultResultOrder("ipv4first");
 const WADetector = require("./walz-loader");
 
-const DEFAULT_TIMEOUT_MS = parseInt(process.env.WA_TIMEOUT_MS || "7500", 10);
+const DEFAULT_TIMEOUT_MS = parseInt(process.env.WA_TIMEOUT_MS || "7000", 10);
 
 let keepAliveDispatcher;
 try {
   const { Agent } = require("undici");
   keepAliveDispatcher = new Agent({
-    connections: 64,
+    connections: 96,
     pipelining: 1,
-    keepAliveTimeout: 45000,
-    keepAliveMaxTimeout: 90000,
-    connect: { timeout: 4500, rejectUnauthorized: true },
-    bodyTimeout: 10000,
-    headersTimeout: 8000
+    keepAliveTimeout: 60000,
+    keepAliveMaxTimeout: 120000,
+    connect: { timeout: 3500, rejectUnauthorized: true },
+    bodyTimeout: 8000,
+    headersTimeout: 6000
   });
 } catch (_) {}
 
@@ -371,12 +371,22 @@ async function checkPhone(rawPhone) {
     }
 
     const formattedPhone = `+${payload.phoneInfo.full}`;
-    const existText = await callWA(payload.exist, payload.userAgent, payload.headers);
-    await new Promise(r => setTimeout(r, 12));
-    const codeText = await callWA(payload.code, payload.userAgent, payload.headers);
+    let existText = "";
+    let codeText = "";
 
-    const parsed = WADetector.parseDualResponse(payload.phoneInfo, existText, codeText);
-    return normalizeResult(formattedPhone, parsed, existText, codeText);
+    try {
+      existText = await callWA(payload.exist, payload.userAgent, payload.headers);
+    } catch (e1) {
+      throw e1;
+    }
+
+    try {
+      await new Promise(r => setTimeout(r, 5));
+      codeText = await callWA(payload.code, payload.userAgent, payload.headers);
+    } catch (_) {}
+
+    const parsed = WADetector.parseDualResponse(payload.phoneInfo, existText, codeText || null);
+    return normalizeResult(formattedPhone, parsed, existText, codeText || null);
   } catch (e) {
     return {
       success: false,
@@ -408,16 +418,24 @@ async function triggerEmailVerification(rawPhone) {
     let codeText = "";
 
     if (payload.exist) {
-      existText = await callWA(payload.exist, payload.userAgent, payload.headers);
+      try { existText = await callWA(payload.exist, payload.userAgent, payload.headers); } catch (_) {}
     }
     if (payload.code) {
-      if (existText) await new Promise(r => setTimeout(r, 12));
-      codeText = await callWA(payload.code, payload.userAgent, payload.headers);
+      try {
+        if (existText) await new Promise(r => setTimeout(r, 5));
+        codeText = await callWA(payload.code, payload.userAgent, payload.headers);
+      } catch (_) {}
     }
     if (payload.email) {
-      if (existText || codeText) await new Promise(r => setTimeout(r, 12));
-      const emailResp = await callWA(payload.email, payload.userAgent, payload.headers);
-      codeText = emailResp || codeText;
+      try {
+        if (existText || codeText) await new Promise(r => setTimeout(r, 5));
+        const emailResp = await callWA(payload.email, payload.userAgent, payload.headers);
+        codeText = emailResp || codeText;
+      } catch (_) {}
+    }
+
+    if (!existText && !codeText) {
+      return { success: false, phone: cleanPhone, error: "REQUEST_TIMEOUT" };
     }
 
     const parsed = typeof WADetector.parseEmailResponse === "function"
