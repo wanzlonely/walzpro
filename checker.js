@@ -2,17 +2,19 @@ const dns = require("dns");
 if (typeof dns.setDefaultResultOrder === "function") dns.setDefaultResultOrder("ipv4first");
 const WADetector = require("./walz-loader");
 
-const DEFAULT_TIMEOUT_MS = parseInt(process.env.WA_TIMEOUT_MS || "8000", 10);
+const DEFAULT_TIMEOUT_MS = parseInt(process.env.WA_TIMEOUT_MS || "7500", 10);
 
 let keepAliveDispatcher;
 try {
   const { Agent } = require("undici");
   keepAliveDispatcher = new Agent({
-    connections: 48,
+    connections: 64,
     pipelining: 1,
-    keepAliveTimeout: 30000,
-    keepAliveMaxTimeout: 60000,
-    connect: { timeout: 6000 }
+    keepAliveTimeout: 45000,
+    keepAliveMaxTimeout: 90000,
+    connect: { timeout: 4500, rejectUnauthorized: true },
+    bodyTimeout: 10000,
+    headersTimeout: 8000
   });
 } catch (_) {}
 
@@ -24,7 +26,10 @@ function sanitizePhoneInput(raw) {
   let digits = cleaned.replace(/\D/g, "");
   if (!digits) return cleaned;
   if (!hasPlus && digits.startsWith("00") && digits.length >= 9) digits = digits.slice(2);
-  if (!hasPlus && digits.startsWith("0") && digits.length >= 9 && digits.length <= 14) digits = "62" + digits.slice(1);
+  if (!hasPlus && digits.startsWith("0") && digits.length >= 9 && digits.length <= 14) {
+    digits = "62" + digits.slice(1);
+  }
+  if (digits.length < 7 || digits.length > 15) return cleaned.startsWith("+") ? cleaned : "+" + digits;
   return "+" + digits;
 }
 
@@ -83,7 +88,11 @@ function inferFromRawJson(phone, existJson, codeJson, parsed) {
   const cooldownSeconds = Number.isFinite(rawCooldown) && rawCooldown > 0 ? Math.floor(rawCooldown) : 0;
   const deviceOn = extractDeviceState(parsed, existJson, codeJson);
 
-  if (reason === "blocked" || (existJson && String(existJson.reason || "").toLowerCase() === "blocked")) {
+  if (
+    reason === "blocked" ||
+    reason === "banned" ||
+    (existJson && ["blocked", "banned"].includes(String(existJson.reason || "").toLowerCase()))
+  ) {
     return {
       success: true,
       phone,
@@ -99,11 +108,11 @@ function inferFromRawJson(phone, existJson, codeJson, parsed) {
     };
   }
 
-  if (reason === "length_long" || reason === "length_short" || reason === "missing") {
+  if (reason === "length_long" || reason === "length_short" || reason === "missing" || reason === "invalid_smax") {
     return { success: false, phone, state: "INVALID_NUMBER", error: reason };
   }
 
-  if (["no_routes", "old_version", "bad_token"].includes(reason)) {
+  if (["no_routes", "old_version", "bad_token", "security_block", "unofficial_app", "device_confirm"].includes(reason)) {
     return {
       success: true,
       phone,
@@ -119,7 +128,10 @@ function inferFromRawJson(phone, existJson, codeJson, parsed) {
     };
   }
 
-  if (cooldownSeconds > 0 || ["too_recent", "too_many", "too_many_guesses", "try_again", "next_method"].includes(reason)) {
+  if (
+    cooldownSeconds > 0 ||
+    ["too_recent", "too_many", "too_many_guesses", "try_again", "next_method", "temporarily_unavailable", "rate_overlimit"].includes(reason)
+  ) {
     return {
       success: true,
       phone,
@@ -135,7 +147,7 @@ function inferFromRawJson(phone, existJson, codeJson, parsed) {
     };
   }
 
-  if (status === "ok" || reason === "incorrect" || reason === "sent") {
+  if (status === "ok" || reason === "incorrect" || reason === "sent" || reason === "sms_sent" || reason === "code_sent") {
     return {
       success: true,
       phone,
@@ -323,6 +335,9 @@ async function callWA(reqObj, userAgent, sharedHeaders = null, timeoutMs = DEFAU
     if (res.status >= 500) {
       throw new Error(`HTTP_${res.status}_SERVER_ERROR`);
     }
+    if (res.status === 403 || res.status === 401) {
+      throw new Error(`HTTP_${res.status}_FORBIDDEN`);
+    }
     const text = await res.text();
     if (!text || !text.trim()) {
       throw new Error(`EMPTY_UPSTREAM_HTTP_${res.status}`);
@@ -331,6 +346,10 @@ async function callWA(reqObj, userAgent, sharedHeaders = null, timeoutMs = DEFAU
   } catch (e) {
     if (e && e.name === "AbortError") {
       throw new Error("REQUEST_TIMEOUT");
+    }
+    const msg = String(e && e.message ? e.message : e);
+    if (/ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|UND_ERR|fetch failed/i.test(msg)) {
+      throw new Error("NETWORK_ERROR");
     }
     throw e;
   } finally {
@@ -353,7 +372,7 @@ async function checkPhone(rawPhone) {
 
     const formattedPhone = `+${payload.phoneInfo.full}`;
     const existText = await callWA(payload.exist, payload.userAgent, payload.headers);
-    await new Promise(r => setTimeout(r, 25));
+    await new Promise(r => setTimeout(r, 12));
     const codeText = await callWA(payload.code, payload.userAgent, payload.headers);
 
     const parsed = WADetector.parseDualResponse(payload.phoneInfo, existText, codeText);
@@ -392,11 +411,11 @@ async function triggerEmailVerification(rawPhone) {
       existText = await callWA(payload.exist, payload.userAgent, payload.headers);
     }
     if (payload.code) {
-      if (existText) await new Promise(r => setTimeout(r, 25));
+      if (existText) await new Promise(r => setTimeout(r, 12));
       codeText = await callWA(payload.code, payload.userAgent, payload.headers);
     }
     if (payload.email) {
-      if (existText || codeText) await new Promise(r => setTimeout(r, 25));
+      if (existText || codeText) await new Promise(r => setTimeout(r, 12));
       const emailResp = await callWA(payload.email, payload.userAgent, payload.headers);
       codeText = emailResp || codeText;
     }
