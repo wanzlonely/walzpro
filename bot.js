@@ -13,7 +13,7 @@ const FREE_DAILY_LIMIT = parseInt(process.env.FREE_DAILY_LIMIT || "3", 10);
 const PREMIUM_BATCH_LIMIT = parseInt(process.env.PREMIUM_BATCH_LIMIT || "30", 10);
 const IS_VERCEL = Boolean(process.env.VERCEL || process.env.VERCEL_ENV);
 const CONCURRENCY = parseInt(process.env.CONCURRENCY || (IS_VERCEL ? "4" : "8"), 10);
-const CHECK_TIMEOUT_MS = parseInt(process.env.CHECK_TIMEOUT_MS || (IS_VERCEL ? "12000" : "28000"), 10);
+const CHECK_TIMEOUT_MS = parseInt(process.env.CHECK_TIMEOUT_MS || (IS_VERCEL ? "16000" : "28000"), 10);
 const CHECK_RETRIES = parseInt(process.env.CHECK_RETRIES || "2", 10);
 const RESULT_CACHE_TTL = parseInt(process.env.RESULT_CACHE_TTL || "60", 10);
 const TEMP_BUDGET_MS = parseInt(process.env.TEMP_BUDGET_MS || (IS_VERCEL ? "45000" : "300000"), 10);
@@ -711,7 +711,7 @@ async function checkAll(numbers, onProgress, options = {}) {
   const n = numbers.length;
   const large = n >= 12;
   const poolCap = IS_VERCEL
-    ? (large ? Math.min(Math.max(CONCURRENCY, 5), 8) : Math.min(CONCURRENCY, 5))
+    ? (large ? Math.min(Math.max(CONCURRENCY, 3), 5) : Math.min(CONCURRENCY, 4))
     : Math.min(CONCURRENCY, 14);
   let adaptivePool = n >= 20
     ? Math.min(poolCap, Math.max(4, CONCURRENCY))
@@ -723,7 +723,7 @@ async function checkAll(numbers, onProgress, options = {}) {
   if (forceFresh) adaptivePool = Math.max(1, Math.min(adaptivePool, IS_VERCEL ? 4 : 5));
 
   const perTimeout = IS_VERCEL
-    ? (large ? Math.min(CHECK_TIMEOUT_MS, 9000) : CHECK_TIMEOUT_MS)
+    ? (large ? Math.min(CHECK_TIMEOUT_MS, 14000) : CHECK_TIMEOUT_MS)
     : CHECK_TIMEOUT_MS;
   const perAttempts = IS_VERCEL && large ? 0 : (forceFresh ? CHECK_RETRIES + 1 : CHECK_RETRIES);
   const smartOpts = { timeoutMs: perTimeout, maxAttempts: perAttempts };
@@ -786,7 +786,7 @@ async function triggerEmailAll(numbers, onProgress) {
         ? Math.min(poolCap, Math.max(2, CONCURRENCY))
         : Math.min(Math.max(1, CONCURRENCY), n);
   const perTimeout = IS_VERCEL
-    ? (large ? Math.min(CHECK_TIMEOUT_MS, 9000) : CHECK_TIMEOUT_MS)
+    ? (large ? Math.min(CHECK_TIMEOUT_MS, 14000) : CHECK_TIMEOUT_MS)
     : CHECK_TIMEOUT_MS;
   const perAttempts = IS_VERCEL && large ? 0 : CHECK_RETRIES;
   const smartOpts = { timeoutMs: perTimeout, maxAttempts: perAttempts };
