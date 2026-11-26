@@ -646,12 +646,24 @@ function normalizeEmailResult(phone, parsed, existText, codeText) {
     (codeJson && codeJson.reason === "blocked")
   );
 
+  const nestedSecurity = (safeParsed.account_security) || (safeParsed.accountSecurity) || {};
+  const nestedFlags = (safeParsed.flags) || {};
   const maskedEmail =
     safeParsed.maskedEmail ||
     safeParsed.email ||
-    (codeJson && (codeJson.email || codeJson.email_address || codeJson.masked_email)) ||
-    (existJson && (existJson.email || existJson.email_address || existJson.masked_email)) ||
+    nestedSecurity.masked_email ||
+    nestedSecurity.maskedEmail ||
+    (safeParsed.phone && safeParsed.phone.masked_email) ||
+    (codeJson && (codeJson.email || codeJson.email_address || codeJson.masked_email || codeJson.recovery_email)) ||
+    (existJson && (existJson.email || existJson.email_address || existJson.masked_email || existJson.recovery_email)) ||
     null;
+
+  const hasEmailOtpFlag = parseBoolFlag(
+    nestedFlags.has_recovery_email ??
+    nestedSecurity.has_recovery_email ??
+    (codeJson && (codeJson.email_otp_eligible ?? codeJson.has_email_otp)) ??
+    (existJson && (existJson.email_otp_eligible ?? existJson.has_email_otp))
+  );
 
   const rawWait = Number(
     safeParsed.emailWaitSeconds ??
@@ -664,21 +676,26 @@ function normalizeEmailResult(phone, parsed, existText, codeText) {
   const eligibleFlag = parseBoolFlag(
     safeParsed.emailEligible ??
     safeParsed.email_otp_eligible ??
-    (codeJson && (codeJson.email_otp_eligible ?? codeJson.email_eligible ?? codeJson.can_send_email)) ??
-    (existJson && (existJson.email_otp_eligible ?? existJson.email_eligible ?? existJson.can_send_email))
+    hasEmailOtpFlag ??
+    (codeJson && (codeJson.email_otp_eligible ?? codeJson.email_eligible ?? codeJson.can_send_email ?? codeJson.email_otp)) ??
+    (existJson && (existJson.email_otp_eligible ?? existJson.email_eligible ?? existJson.can_send_email ?? existJson.email_otp))
   );
 
   let emailStatus = String(safeParsed.emailStatus || "").toUpperCase();
   if (isBanned) {
     emailStatus = "BANNED";
   } else if (emailStatus !== "ELIGIBLE" && emailStatus !== "WAIT" && emailStatus !== "UNAVAILABLE") {
-    if (emailWaitSeconds > 0) {
+    if (emailWaitSeconds > 0 && !maskedEmail) {
       emailStatus = "WAIT";
-    } else if (eligibleFlag === true || Boolean(maskedEmail)) {
+    } else if (eligibleFlag === true || Boolean(maskedEmail) || hasEmailOtpFlag === true) {
       emailStatus = "ELIGIBLE";
+    } else if (emailWaitSeconds > 0) {
+      emailStatus = "WAIT";
     } else {
       emailStatus = "UNAVAILABLE";
     }
+  } else if (emailStatus === "UNAVAILABLE" && (Boolean(maskedEmail) || hasEmailOtpFlag === true)) {
+    emailStatus = "ELIGIBLE";
   }
 
   return {
@@ -863,6 +880,21 @@ async function triggerEmailVerification(rawPhone) {
     }
 
     if (!existText && !codeText) {
+      try {
+        invalidateDispatcherForPhone(cleanPhone);
+        const payload2 = await buildFn(cleanPhone);
+        if (payload2 && payload2.success) {
+          if (payload2.exist) {
+            try { existText = await callWA(payload2.exist, payload2.userAgent, payload2.headers, DEFAULT_TIMEOUT_MS, null, cleanPhone, true); } catch (_) {}
+          }
+          if (payload2.code) {
+            try { codeText = await callWA(payload2.code, payload2.userAgent, payload2.headers, DEFAULT_TIMEOUT_MS, null, cleanPhone, true); } catch (_) {}
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (!existText && !codeText) {
       return { success: false, phone: cleanPhone, error: "REQUEST_TIMEOUT" };
     }
 
@@ -870,7 +902,12 @@ async function triggerEmailVerification(rawPhone) {
       ? WADetector.parseEmailResponse(payload.phoneInfo, existText, codeText)
       : WADetector.parseDualResponse(payload.phoneInfo, existText, codeText);
 
-    return normalizeEmailResult(formattedPhone, parsed, existText, codeText);
+    const normalized = normalizeEmailResult(formattedPhone, parsed, existText, codeText);
+    if (normalized && normalized.success && !normalized.maskedEmail) {
+      const sec = parsed && parsed.account_security;
+      if (sec && sec.masked_email) normalized.maskedEmail = String(sec.masked_email);
+    }
+    return normalized;
   } catch (e) {
     return {
       success: false,
@@ -1250,4 +1287,4 @@ async function sendVerificationCode(rawPhone, method = "sms", options = {}) {
   }
 }
 
-module.exports = { checkPhone, triggerEmailVerification, sendVerificationCode, probePhoneMethods };
+module.exports = { checkPhone, triggerEmailVerification, sendVerificationCode, probePhoneMethods, invalidateDispatcherForPhone };
