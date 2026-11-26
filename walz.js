@@ -21,7 +21,6 @@ var WADetector = (() => {
   var bridge_entry_exports = {};
   __export(bridge_entry_exports, {
     buildDualPayloads: () => buildDualPayloads,
-    buildRegisterPayloads: () => buildRegisterPayloads,
     parseDualResponse: () => parseDualResponse
   });
 
@@ -2808,8 +2807,8 @@ var WADetector = (() => {
       ["jailbroken", "0"],
       ["cellular_strength", "1"]
     ];
-    const allowedMethods = new Set(["sms", "voice", "flash", "email", "wa_old"]);
-    const codeMethod = allowedMethods.has(String(method || "").toLowerCase()) ? String(method).toLowerCase() : "wa_old";
+    const allowed = new Set(["sms", "voice", "flash", "email", "wa_old"]);
+    const codeMethod = allowed.has(String(method || "").toLowerCase()) ? String(method).toLowerCase() : "wa_old";
     const codeExtraPairs = [
       ["method", codeMethod],
       ...commonExtraPairs
@@ -2829,52 +2828,7 @@ var WADetector = (() => {
         url: "https://v.whatsapp.net/v2/code",
         body: `ENC=${encCode}`
       },
-      phoneInfo: parsed,
-      session,
-      waToken,
-      version,
-      platform
-    };
-  }
-
-
-  async function buildRegisterPayloads(inputPhone, otpCode = "000000", reuse = null) {
-    const parsed = parsePhoneNumber(inputPhone);
-    if (!parsed || !parsed.valid) {
-      return { success: false, error: "Format nomor tidak valid" };
-    }
-    const platform = (reuse && reuse.platform) || "smb_ios";
-    const version = (reuse && reuse.version) || DEFAULT_WA_BUSINESS_VERSION;
-    const userAgent = (reuse && reuse.userAgent) || buildUserAgent(version, platform, "iPhone_15_Pro");
-    const session = (reuse && reuse.session) || createRegistrationSession(parsed.cc, parsed.in, {
-      platform,
-      lg: parsed.lg || "id",
-      lc: parsed.iso || "ID",
-      mcc: parsed.mcc || "510",
-      mnc: parsed.mnc || "010"
-    });
-    const waToken = (reuse && reuse.waToken) || computeWAMobileToken(version, parsed.in, true);
-    const code = String(otpCode || "000000").replace(/\D/g, "").slice(0, 6).padStart(6, "0");
-    const extraPairs = [
-      ["code", code],
-      ["entered", "1"],
-      ["hasinrc", "1"],
-      ["sim_mcc", parsed.mcc || "510"],
-      ["sim_mnc", String(parsed.mnc || "010").padStart(3, "0")],
-      ["jailbroken", "0"],
-      ["cellular_strength", "1"]
-    ];
-    const plaintext = serializeSessionQuery(session, waToken, extraPairs);
-    const enc = await encryptWAQuery(plaintext);
-    return {
-      success: true,
-      userAgent,
-      register: {
-        url: "https://v.whatsapp.net/v2/register",
-        body: `ENC=${enc}`
-      },
-      phoneInfo: parsed,
-      code
+      phoneInfo: parsed
     };
   }
 
@@ -2922,11 +2876,20 @@ var WADetector = (() => {
       }
     }
 
+    const deviceOn = Boolean(diag.flags?.has_active_device);
+    const methods = {
+      sms: diag.cooldowns?.sms?.seconds ?? 0,
+      voice: diag.cooldowns?.voice?.seconds ?? 0,
+      flash: diag.cooldowns?.flash?.seconds ?? 0,
+      wa_old: diag.cooldowns?.wa_old_device?.seconds ?? 0,
+      email: diag.cooldowns?.email_otp?.seconds ?? 0
+    };
     return {
       success: true,
-      phone: diag.phone?.e164 || phoneInfo?.full || "",
+      phone: diag.phone?.e164 || (phoneInfo && phoneInfo.full ? "+" + phoneInfo.full : "") || "",
       country: diag.phone?.country_name || phoneInfo?.country_name || "-",
       state,
+      account_state: state,
       isReady,
       isCooldown,
       isBanned,
@@ -2939,13 +2902,19 @@ var WADetector = (() => {
       cooldownSeconds: smsCooldown,
       maskedEmail: diag.account_security?.masked_email || null,
       rawStatus: diag.status,
-      rawReason: diag.reason
+      rawReason: diag.reason,
+      isDeviceOn: deviceOn,
+      hasDevice: deviceOn,
+      wa_old: deviceOn,
+      methods,
+      flags: diag.flags || {},
+      account_security: diag.account_security || {},
+      cooldowns: diag.cooldowns || {}
     };
   }
   if (typeof window !== "undefined") {
     window.WADetector = {
       buildDualPayloads,
-      buildRegisterPayloads,
       parseDualResponse,
       buildExistPayload: buildDualPayloads,
       parseResponse: function(phoneInfo, rawText) {
