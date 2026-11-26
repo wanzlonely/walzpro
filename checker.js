@@ -2,7 +2,7 @@ const dns = require("dns");
 if (typeof dns.setDefaultResultOrder === "function") dns.setDefaultResultOrder("ipv4first");
 const WADetector = require("./walz-loader");
 
-const DEFAULT_TIMEOUT_MS = parseInt(process.env.WA_TIMEOUT_MS || "30000", 10);
+const DEFAULT_TIMEOUT_MS = parseInt(process.env.WA_TIMEOUT_MS || "18000", 10);
 
 function extractCountryCallingCode(phone) {
   const digits = String(phone || "").replace(/\D/g, "");
@@ -530,6 +530,20 @@ function extractMethodWaits(parsed, existJson, codeJson) {
   };
 }
 
+function mapEngineState(parsed) {
+  const raw = String(parsed.state || parsed.account_state || "").toUpperCase();
+  if (parsed.isBanned || raw === "BANNED") return "BANNED";
+  if (parsed.isCloneBlocked || parsed.isSecurityBlock || parsed.isUnofficialAppBlock) return "CLONE_BLOCKED";
+  if (raw === "CLONE_OR_UNOFFICIAL_APP_BLOCK" || raw === "SECURITY_BLOCK" || raw === "CLONE_BLOCKED") return "CLONE_BLOCKED";
+  if (raw === "INVALID_NUMBER" || raw === "NO_ROUTES") return raw === "INVALID_NUMBER" ? "INVALID_NUMBER" : "CLONE_BLOCKED";
+  if (parsed.isCooldown || ["IN_COOLDOWN", "RATE_LIMITED_COOLDOWN", "TEMP_LOCKED_COOLDOWN", "COOLDOWN", "SMS_LIMIT"].includes(raw)) {
+    return "COOLDOWN";
+  }
+  if (parsed.isReady || raw === "AVAILABLE_READY" || raw === "REGISTERED_ON_DEVICE" || raw === "READY") return "READY";
+  if (raw === "IN_USE") return "IN_USE";
+  return raw || "UNKNOWN";
+}
+
 function normalizeResult(phone, parsed, existText, codeText) {
   const existJson = safeJsonParse(existText);
   const codeJson = safeJsonParse(codeText);
@@ -551,59 +565,84 @@ function normalizeResult(phone, parsed, existText, codeText) {
     };
   }
 
-  const codeReason = String((codeJson && codeJson.reason) || (existJson && existJson.reason) || parsed.reason || "").toLowerCase();
-  const codeStatus = String((codeJson && codeJson.status) || (existJson && existJson.status) || "").toLowerCase();
   const methods = extractMethodWaits(parsed, existJson, codeJson);
-  const primaryWait = methods.sms || methods.voice || methods.email || methods.wa_old || methods.flash || 0;
+  const engineCd = Number(parsed.cooldownSeconds);
+  const smsCd = Number.isFinite(engineCd) && engineCd > 0 ? Math.floor(engineCd) : 0;
 
-  const hardCooldownReasons = [
-    "too_recent", "too_many", "too_many_guesses", "try_again", "next_method",
-    "temporarily_unavailable", "rate_overlimit", "no_routes"
-  ];
-  const concurrentReasons = ["guessed_too_fast", "wrong_code", "stale_code", "code_mismatch"];
-  const isConcurrent = concurrentReasons.includes(codeReason) || Boolean(parsed.isConcurrent);
-  const isHardCooldown = hardCooldownReasons.includes(codeReason) || primaryWait > 0;
-
+  // Engine (parseDualResponse) already filters wa_old timer echo from SMS cooldown.
+  // Trust isReady / isCooldown / cooldownSeconds from engine first.
   let isBanned = Boolean(parsed.isBanned);
-  let isCloneBlocked = Boolean(parsed.isCloneBlocked);
-  const baseReady = Boolean(parsed.isReady) || codeStatus === "ok" || ["incorrect", "sent", "sms_sent", "code_sent"].includes(codeReason);
-
-  let isReady = false;
-  let isCooldown = false;
+  let isCloneBlocked = Boolean(parsed.isCloneBlocked || parsed.isSecurityBlock || parsed.isUnofficialAppBlock);
+  let isReady = Boolean(parsed.isReady);
+  let isCooldown = Boolean(parsed.isCooldown);
   let isSmsLimited = false;
   let isInUse = false;
-  let cooldownSeconds = primaryWait;
-  let state = "UNKNOWN";
+  let cooldownSeconds = smsCd;
+  let state = mapEngineState(parsed);
 
-  if (isBanned) {
-    state = "BANNED";
-  } else if (isCloneBlocked) {
-    state = "CLONE_BLOCKED";
-  } else if (isConcurrent && primaryWait === 0) {
-    isInUse = true;
+  if (state === "BANNED") {
+    isBanned = true;
     isReady = false;
-    state = "IN_USE";
-  } else if (isHardCooldown || primaryWait > 0) {
+    isCooldown = false;
+    cooldownSeconds = 0;
+  } else if (state === "CLONE_BLOCKED" || state === "INVALID_NUMBER") {
+    isReady = false;
+    isCooldown = false;
+    if (state === "INVALID_NUMBER") {
+      return {
+        success: false,
+        phone: parsed.phone || phone,
+        state: "INVALID_NUMBER",
+        error: parsed.description || parsed.rawReason || "invalid_number",
+        methods,
+        cooldownSeconds: 0
+      };
+    }
+    isCloneBlocked = true;
+  } else if (state === "COOLDOWN" || isCooldown) {
     isCooldown = true;
     isReady = false;
     state = "COOLDOWN";
-    cooldownSeconds = primaryWait > 0 ? primaryWait : Math.max(cooldownSeconds, 60);
-  } else if (baseReady) {
+    if (cooldownSeconds <= 0) {
+      const fallback = methods.sms || Number(codeJson && (codeJson.sms_wait || codeJson.retry_after)) || 0;
+      cooldownSeconds = Number.isFinite(fallback) && fallback > 0 ? Math.floor(fallback) : 60;
+    }
+  } else if (state === "READY" || isReady) {
     isReady = true;
+    isCooldown = false;
     cooldownSeconds = 0;
     state = "READY";
-  } else {
+  } else if (state === "IN_USE") {
+    isInUse = true;
     isReady = false;
-    state = "UNKNOWN";
+  } else {
+    // Fallback only when engine is inconclusive
+    const codeReason = String((codeJson && codeJson.reason) || (existJson && existJson.reason) || parsed.rawReason || "").toLowerCase();
+    if (["too_recent", "too_many", "too_many_guesses", "temporarily_unavailable"].includes(codeReason) && smsCd > 0) {
+      isCooldown = true;
+      isReady = false;
+      state = "COOLDOWN";
+      cooldownSeconds = smsCd;
+    } else if (isReady) {
+      state = "READY";
+      cooldownSeconds = 0;
+    }
   }
 
-  const deviceOn = extractDeviceState(parsed, existJson, codeJson);
+  const deviceOn = Boolean(
+    parsed.isDeviceOn ||
+    parsed.hasDevice ||
+    (parsed.flags && parsed.flags.has_active_device) ||
+    extractDeviceState(parsed, existJson, codeJson)
+  );
   const availableMethods = [];
-  if (methods.sms === 0 && !isBanned && !isCloneBlocked) availableMethods.push("sms");
-  if (methods.voice === 0 && !isBanned && !isCloneBlocked) availableMethods.push("voice");
-  if (methods.flash === 0 && !isBanned && !isCloneBlocked) availableMethods.push("flash");
-  if (methods.wa_old === 0 && deviceOn && !isBanned) availableMethods.push("wa_old");
-  if (methods.email === 0 && !isBanned && !isCloneBlocked) availableMethods.push("email");
+  if (!isBanned && !isCloneBlocked) {
+    if ((methods.sms || 0) === 0) availableMethods.push("sms");
+    if ((methods.voice || 0) === 0) availableMethods.push("voice");
+    if ((methods.flash || 0) === 0) availableMethods.push("flash");
+    if ((methods.wa_old || 0) === 0 && deviceOn) availableMethods.push("wa_old");
+    if ((methods.email || 0) === 0) availableMethods.push("email");
+  }
 
   return {
     ...parsed,
@@ -619,6 +658,8 @@ function normalizeResult(phone, parsed, existText, codeText) {
     cooldownSeconds: isCooldown || isSmsLimited || isInUse ? cooldownSeconds : 0,
     methods,
     availableMethods,
+    maskedEmail: parsed.maskedEmail || null,
+    description: parsed.description || parsed.cooldownLabel || "",
     wa_old: deviceOn,
     isDeviceOn: deviceOn,
     hasDevice: deviceOn
@@ -797,13 +838,23 @@ async function checkPhone(rawPhone) {
     try {
       existText = await callWA(payload.exist, payload.userAgent, payload.headers, DEFAULT_TIMEOUT_MS, null, cleanPhone);
     } catch (e1) {
-      throw e1;
+      try {
+        invalidateDispatcherForPhone(cleanPhone);
+        existText = await callWA(payload.exist, payload.userAgent, payload.headers, DEFAULT_TIMEOUT_MS + 4000, null, cleanPhone, true);
+      } catch (e2) {
+        throw e2;
+      }
     }
 
     try {
-      await new Promise(r => setTimeout(r, 5));
+      await new Promise(r => setTimeout(r, 8));
       codeText = await callWA(payload.code, payload.userAgent, payload.headers, DEFAULT_TIMEOUT_MS, null, cleanPhone);
-    } catch (_) {}
+    } catch (_) {
+      try {
+        invalidateDispatcherForPhone(cleanPhone);
+        codeText = await callWA(payload.code, payload.userAgent, payload.headers, DEFAULT_TIMEOUT_MS + 4000, null, cleanPhone, true);
+      } catch (_) {}
+    }
 
     const parsed = WADetector.parseDualResponse(payload.phoneInfo, existText, codeText || null);
     let normalized = normalizeResult(formattedPhone, parsed, existText, codeText || null);
